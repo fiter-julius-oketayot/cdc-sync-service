@@ -1,83 +1,99 @@
-# Debezium CDC Sync Service
+# Oracle GoldenGate CDC Implementation
 
-A bi-directional Change Data Capture (CDC) synchronization service between Oracle Database and PostgreSQL using Debezium, Kafka, and Spring Boot.
+A complete Change Data Capture (CDC) solution using **Oracle GoldenGate Free Edition** to replicate data changes from Oracle Database to PostgreSQL in real-time.
 
 ## Table of Contents
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Configuration](#configuration)
+- [Scripts](#scripts)
+- [Web UI Configuration](#web-ui-configuration)
 - [Testing CDC](#testing-cdc)
 - [Troubleshooting](#troubleshooting)
-- [How It Works](#how-it-works)
+- [Useful Commands](#useful-commands)
 
 ---
 
 ## Overview
 
-This project implements real-time bi-directional database synchronization:
-- **Oracle → PostgreSQL**: Captures changes from Oracle DBZUSER.CUSTOMERS and replicates to PostgreSQL public.customers
-- **PostgreSQL → Oracle**: Captures changes from PostgreSQL and replicates back to Oracle
+This project implements **real-time data replication** from Oracle Database to PostgreSQL using Oracle GoldenGate Free Edition.
 
 ### Key Features
-- ✅ Real-time CDC using Debezium Oracle and PostgreSQL connectors
-- ✅ Bi-directional synchronization
-- ✅ Automatic schema discovery
-- ✅ Support for INSERT, UPDATE, DELETE operations
-- ✅ LogMiner-based Oracle CDC (no Golden Gate required)
+- ✅ **Real-time CDC** - Changes replicated in milliseconds
+- ✅ **Transaction Consistency** - ACID properties maintained
+- ✅ **All DML Operations** - INSERT, UPDATE, DELETE support
+- ✅ **Web Monitoring UI** - Visual dashboards on ports 9100/9200
+- ✅ **Free for Production** - No license costs
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     CDC Architecture                         │
-└─────────────────────────────────────────────────────────────┘
-
-Oracle DB (DBZUSER.CUSTOMERS)
-    ↓ LogMiner CDC
-Debezium Connect (Oracle Connector)
-    ↓ Publishes to
-Kafka Topic: oracle.DBZUSER.CUSTOMERS
-    ↓ Consumed by
-Spring Boot Application
-    ↓ Writes to
-PostgreSQL (public.customers)
-    ↓ PostgreSQL CDC
-Debezium Connect (PostgreSQL Connector)
-    ↓ Publishes to
-Kafka Topic: postgres.public.customers
-    ↓ Consumed by
-Spring Boot Application
-    ↓ Writes back to
-Oracle DB (DBZUSER.CUSTOMERS)
+┌──────────────────┐
+│  Oracle Database │  (Source - Port 1521)
+│   OGGUSER schema │
+│  CUSTOMERS table │
+└────────┬─────────┘
+         │ Redo Logs
+         ↓
+┌──────────────────┐
+│ GoldenGate       │  (Extract - Port 9100)
+│ for Oracle       │  Captures DML changes
+│ goldengate-oracle│  Writes to trail files
+└────────┬─────────┘
+         │ Trail Files / Network
+         ↓
+┌──────────────────┐
+│ GoldenGate       │  (Replicat - Port 9200)
+│ for PostgreSQL   │  Reads trail files
+│ goldengate-postgres│ Applies via JDBC
+└────────┬─────────┘
+         │
+         ↓
+┌──────────────────┐
+│ PostgreSQL DB    │  (Target - Port 5434)
+│  public schema   │
+│  customers table │
+└──────────────────┘
 ```
 
-### Components
-- **Oracle XE 21c**: Source database with DBZUSER schema
-- **PostgreSQL 15**: Target database with public schema
-- **Apache Kafka**: Message broker for CDC events
-- **Debezium Connect**: CDC connectors for Oracle and PostgreSQL
-- **Spring Boot**: Java application that consumes CDC events and performs sync
+### Services
+
+| Service | Container | Port | Description |
+|---------|-----------|------|-------------|
+| Oracle DB | oracle-db | 1521 | Source database (XE 21c) |
+| PostgreSQL | postgres-db | 5434 | Target database (v16) |
+| GoldenGate Oracle | goldengate-oracle | 9100 (HTTPS), 7809 | Extract/Pump processes |
+| GoldenGate PostgreSQL | goldengate-postgres | 9200 (HTTPS), 7810 | Replicat process |
 
 ---
 
 ## Prerequisites
 
 ### Software Requirements
-- Docker & Docker Compose
-- JDK 17+
-- Gradle 8+ (or use included wrapper)
+- **Docker** (20.10+) and **Docker Compose** (2.0+)
+- **Oracle Account** (free) - for Oracle Container Registry access
+- **8 GB RAM minimum**
+- **20 GB disk space**
 
-### Docker Containers
-All services run in Docker:
-- `oracle-db`: Oracle XE 21c (port 1521)
-- `postgres`: PostgreSQL 15 (port 5433)
-- `zookeeper`: Kafka coordination (port 2181)
-- `kafka`: Message broker (port 9092)
-- `connect`: Debezium Connect (port 8083)
+### Oracle Container Registry Setup
+
+1. **Create Oracle Account**: Register at [oracle.com](https://profile.oracle.com/myprofile/account/create-account.jspx) (free)
+
+2. **Accept License Agreement**:
+   - Go to [container-registry.oracle.com](https://container-registry.oracle.com)
+   - Search for "goldengate"
+   - Click **goldengate-oracle-free** and **goldengate-postgresql-free**
+   - Accept the Oracle Standard Terms and Restrictions
+
+3. **Login to Docker**:
+   ```bash
+   docker login container-registry.oracle.com
+   # Username: your-oracle-email@example.com
+   # Password: your-account-password (or auth token)
+   ```
 
 ---
 
@@ -86,412 +102,603 @@ All services run in Docker:
 ### 1. Start All Services
 
 ```bash
+# Start containers
 docker-compose up -d
+
+# Check status (wait ~3 minutes for healthy status)
+docker-compose ps
 ```
 
-Wait ~2 minutes for all services to be healthy.
-
-### 2. Setup Oracle Database
-
-#### Enable ARCHIVELOG Mode
-
-Connect to Oracle using DBeaver or SQL*Plus as SYSDBA:
-
-```sql
--- Connect as SYSDBA
-SHUTDOWN IMMEDIATE;
-STARTUP MOUNT;
-ALTER DATABASE ARCHIVELOG;
-ALTER DATABASE OPEN;
-
--- Verify
-SELECT LOG_MODE FROM V$DATABASE;
--- Should show: ARCHIVELOG
-```
-
-#### Create CDC User and Table
+### 2. Run Setup Script
 
 ```bash
 cd scripts
-docker cp setup-oracle.sql oracle-db:/tmp/
-docker exec oracle-db sqlplus / as sysdba @/tmp/setup-oracle.sql
+chmod +x *.sh    # Make scripts executable (Linux/Mac)
+./setup.sh
 ```
 
-This creates:
-- `DBZUSER` user with LogMiner permissions
-- `DBZUSER.CUSTOMERS` table with supplemental logging
-- Sample test data
+### 3. Access Web UIs
 
-### 3. Setup PostgreSQL Database
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Oracle GoldenGate | https://localhost:9100 | oggadmin / Welcome1! |
+| PostgreSQL GoldenGate | https://localhost:9200 | oggadmin / Welcome1! |
+
+> **Note**: Accept the self-signed certificate warning in your browser.
+
+### 4. Test CDC
 
 ```bash
-docker cp setup-postgres.sql postgres:/tmp/
-docker exec postgres psql -U postgres -f /tmp/setup-postgres.sql
-```
-
-This creates:
-- `public.customers` table
-- Enables PostgreSQL logical replication
-
-### 4. Register Debezium Connectors
-
-```bash
-./register-connectors.sh
-```
-
-Wait ~30 seconds for connectors to start.
-
-### 5. Verify Connector Status
-
-```bash
-./health-check.sh
-```
-
-Expected output:
-```
-✓ Oracle Connector: RUNNING
-✓ PostgreSQL Connector: RUNNING
-✓ Kafka topics created
-✓ Spring Boot ready to start
-```
-
-### 6. Start Spring Boot Application
-
-```bash
-cd ..
-./gradlew bootRun
+./test.sh
 ```
 
 ---
 
-## Configuration
+## Scripts
 
-### Oracle Connector Configuration
+The `scripts/` folder contains 4 main scripts:
 
-File: `connectors/oracle-connector.json`
+| Script | Description |
+|--------|-------------|
+| `setup.sh` | Complete setup - databases and GoldenGate configuration |
+| `monitor.sh` | Health checks and monitoring |
+| `test.sh` | Test CDC replication (INSERT/UPDATE) |
+| `manage.sh` | Service management (start/stop/restart/status/logs/clean) |
 
-Key settings:
-```json
-{
-  "database.hostname": "oracle-db",
-  "database.user": "dbzuser",
-  "database.password": "dbzpassword",
-  "database.dbname": "XE",
-  "schema.include.list": "DBZUSER",
-  "log.mining.strategy": "online_catalog",
-  "snapshot.mode": "initial"
-}
+### Usage Examples
+
+```bash
+cd scripts
+
+# Initial setup
+./setup.sh
+
+# Check health
+./monitor.sh
+
+# Test replication
+./test.sh
+
+# Service management
+./manage.sh status
+./manage.sh restart
+./manage.sh logs
+./manage.sh stop
+./manage.sh clean    # Remove all data
 ```
 
-**Important Notes:**
-- Uses **DBZUSER** schema (NOT SYSTEM) to avoid Debezium filtering
-- Requires all V$ views permissions for LogMiner
-- ARCHIVELOG mode must be enabled
-- Supplemental logging required at table level
+---
 
-### PostgreSQL Connector Configuration
+## Web UI Configuration
 
-File: `connectors/postgres-connector.json`
+GoldenGate Free Edition uses web-based configuration. This section provides detailed step-by-step procedures to set up the complete CDC data flow from Oracle to PostgreSQL.
 
-Key settings:
-```json
-{
-  "database.hostname": "postgres",
-  "database.user": "postgres",
-  "schema.include.list": "public",
-  "plugin.name": "pgoutput"
-}
+### Overview of Configuration Steps
+
+```
+1. Access Web UIs and Login
+2. Configure Database Connections (Credentials)
+3. Create Extract Process (Oracle side)
+4. Create Trail Files
+5. Create Distribution Path (Oracle → PostgreSQL)
+6. Create Replicat Process (PostgreSQL side)
+7. Start All Processes
+8. Verify Data Flow
 ```
 
-### Application Configuration
+---
 
-File: `src/main/resources/application.yml`
+### Step 1: Access the Web UIs
 
-```yaml
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5433/postgres
-    username: postgres
-    password: postgres
+#### Oracle GoldenGate Admin Console
+1. Open browser and navigate to: **https://localhost:9100**
+2. Accept the self-signed certificate warning:
+   - Chrome: Click "Advanced" → "Proceed to localhost (unsafe)"
+   - Firefox: Click "Advanced" → "Accept the Risk and Continue"
+   - Edge: Click "Continue to localhost (unsafe)"
 
-oracle:
-  datasource:
-    jdbc-url: jdbc:oracle:thin:@localhost:1521/XE
-    username: dbzuser
-    password: dbzpassword
+#### PostgreSQL GoldenGate Admin Console
+1. Open a new browser tab: **https://localhost:9200**
+2. Accept the certificate warning (same as above)
 
-kafka:
-  bootstrap-servers: localhost:9092
+#### Login Credentials
+- **Username**: `oggadmin`
+- **Password**: `Welcome1!`
+
+> **Tip**: Open both consoles in separate browser tabs for easier configuration.
+
+---
+
+### Step 2: Configure Oracle Database Connection (Source)
+
+On the **Oracle GoldenGate console** (https://localhost:9100):
+
+#### 2.1 Add Database Credential
+1. Click **Configuration** in the left sidebar
+2. Click **Credentials** tab
+3. Click **+ Add Credential** (or the "+" button)
+4. Fill in the form:
+
+   | Field | Value |
+   |-------|-------|
+   | Credential Domain | `OracleGoldenGate` |
+   | Credential Alias | `ogg_oracle` |
+   | User ID | `oggadmin@//oracle-db:1521/XEPDB1` |
+   | Password | `Welcome1` |
+   | Verify Password | `Welcome1` |
+
+   > **Important**: Oracle XE 21c is a **Container Database (CDB)**. You must connect to the **Pluggable Database (PDB)** named `XEPDB1`, NOT to `XE`.
+   >
+   > - ✅ Correct: `oggadmin@//oracle-db:1521/XEPDB1`
+   > - ❌ Wrong: `oggadmin@//oracle-db:1521/XE` (this connects to CDB root, not the PDB)
+
+5. Click **Submit**
+
+#### 2.2 Verify Database Connectivity (Optional)
+To test the connection before proceeding:
+
+```bash
+# From your host machine, verify Oracle is accessible from GoldenGate container
+docker exec goldengate-oracle bash -c "getent hosts oracle-db"
+# Should return: 172.x.x.x  oracle-db
+
+# Verify the oggadmin user works on the XEPDB1 pluggable database
+docker exec oracle-db sqlplus -S oggadmin/Welcome1@//localhost:1521/XEPDB1 <<< "SELECT 1 FROM DUAL; EXIT;"
+# Should return: 1
 ```
+
+If the credential still fails, check:
+- Oracle container is healthy: `docker ps` should show `(healthy)`
+- Network connectivity: containers must be on the same `ogg-network`
+- User exists in PDB: The `oggadmin` user must be created in `XEPDB1`
+
+---
+
+### Step 3: Create Extract Process (Capture Changes)
+
+The Extract process captures changes from Oracle redo logs.
+
+#### 3.1 Add Extract
+1. On Oracle console, click **Extracts** in the left sidebar
+2. Click **+ Add Extract** (or the "+" button)
+3. Select Extract Type: **Integrated Extract**
+4. Click **Next**
+
+#### 3.2 Configure Extract Basic Options
+
+| Field | Value |
+|-------|-------|
+| Process Name | `EXT_ORA` |
+| Description | `Extract changes from Oracle CUSTOMERS table` |
+| Credential Domain | `OracleGoldenGate` |
+| Credential Alias | `ogg_oracle` |
+| Trail Name | `eo` |
+| Trail Size (MB) | `500` |
+
+#### 3.3 Configure Extract Registration
+1. In the **Registration** section:
+   - Check **Register to PDBs** if using pluggable databases
+   - Database: Select your Oracle database connection
+
+#### 3.4 Configure Extract Parameters
+Click on **Parameter File** or **Edit Parameters** and enter:
+
+```
+EXTRACT EXT_ORA
+USERID oggadmin, PASSWORD Welcome1
+EXTTRAIL ./dirdat/eo
+
+-- Report statistics every 60 seconds
+REPORTCOUNT EVERY 60 SECONDS, RATE
+
+-- Table selection
+TABLE OGGUSER.CUSTOMERS;
+```
+
+#### 3.5 Add Trail File
+1. Go to **Trail Files** section (or it may be part of Extract wizard)
+2. Configure local trail:
+
+   | Field | Value |
+   |-------|-------|
+   | Trail Name | `eo` |
+   | Trail Path | `./dirdat/eo` |
+   | Max Size (MB) | `500` |
+
+3. Click **Create and Run** or **Submit**
+
+---
+
+### Step 4: Create Distribution Path (Data Pump)
+
+The Distribution Path sends trail data from Oracle GoldenGate to PostgreSQL GoldenGate.
+
+#### 4.1 Add Distribution Path
+1. On Oracle console, click **Distribution Service** or **Distribution Paths**
+2. Click **+ Add Path**
+
+#### 4.2 Configure Distribution Path
+
+| Field | Value |
+|-------|-------|
+| Path Name | `DIST_ORA_PG` |
+| Description | `Distribute trail to PostgreSQL GoldenGate` |
+| Source Trail | `./dirdat/eo` |
+| Target Host | `goldengate-postgres` |
+| Target Port | `443` (HTTPS) or `9200` |
+| Target Trail | `./dirdat/ep` |
+| Protocol | `wss` (WebSocket Secure) or `https` |
+
+#### 4.3 Target Credentials
+If prompted for target authentication:
+
+| Field | Value |
+|-------|-------|
+| Target User | `oggadmin` |
+| Target Password | `Welcome1!` |
+
+3. Click **Create and Run** or **Submit**
+
+---
+
+### Step 5: Configure PostgreSQL Database Connection (Target)
+
+On the **PostgreSQL GoldenGate console** (https://localhost:9200):
+
+#### 5.1 Add Database Credential
+1. Click **Configuration** → **Credentials**
+2. Click **+ Add Credential**
+3. Fill in:
+
+   | Field | Value |
+   |-------|-------|
+   | Credential Domain | `OracleGoldenGate` |
+   | Credential Alias | `ogg_postgres` |
+   | User ID | `postgres@postgres-db:5432/postgres` |
+   | Password | `postgres` |
+
+   > **Important**: Use port `5432` (internal Docker port), NOT `5434` (external host port).
+   >
+   > - ✅ Correct: `postgres@postgres-db:5432/postgres`
+   > - ❌ Wrong: `postgres@postgres-db:5434/postgres`
+
+4. Click **Submit**
+
+#### 5.2 Configure Database Connection
+Some GoldenGate versions require a connection properties file. If prompted:
+
+1. Click **Configuration** → **Database**
+2. Add connection with JDBC URL:
+
+   ```
+   jdbc:postgresql://postgres-db:5432/postgres
+   ```
+
+   Or configure individual fields:
+
+   | Field | Value |
+   |-------|-------|
+   | Host | `postgres-db` |
+   | Port | `5432` |
+   | Database | `postgres` |
+   | User | `postgres` |
+   | Password | `postgres` |
+
+   > **Note**: Inside Docker network, always use the internal port `5432`, not the external mapped port `5434`.
+
+---
+
+### Step 6: Create Replicat Process (Apply Changes)
+
+The Replicat process applies captured changes to PostgreSQL.
+
+#### 6.1 Add Replicat
+1. On PostgreSQL console, click **Replicats**
+2. Click **+ Add Replicat**
+3. Select Replicat Type: **Parallel Replicat** (recommended) or **Classic Replicat**
+4. Click **Next**
+
+#### 6.2 Configure Replicat Basic Options
+
+| Field | Value |
+|-------|-------|
+| Process Name | `REP_PG` |
+| Description | `Replicate Oracle changes to PostgreSQL` |
+| Credential Domain | `OracleGoldenGate` |
+| Credential Alias | `ogg_postgres` |
+| Trail Name | `ep` |
+| Trail Path | `./dirdat/ep` |
+| Checkpoint Table | `public.gg_checkpoint` |
+
+#### 6.3 Configure Replicat Parameters
+Click **Parameter File** or **Edit Parameters** and enter:
+
+```
+REPLICAT REP_PG
+TARGETDB LIBFILE libggjava.so SET property=dirprm/postgres.props
+REPORTCOUNT EVERY 60 SECONDS, RATE
+
+-- Handle collisions (for initial load or recovery)
+HANDLECOLLISIONS
+
+-- Enable batch SQL for better performance
+BATCHSQL
+
+-- Table mapping: Oracle source -> PostgreSQL target
+MAP OGGUSER.CUSTOMERS, TARGET public.customers,
+    COLMAP (
+        id = ID,
+        first_name = FIRST_NAME,
+        last_name = LAST_NAME,
+        email = EMAIL
+    );
+```
+
+#### 6.4 Create/Verify Checkpoint Table
+The checkpoint table should already exist from setup. If not:
+
+```sql
+-- Run in PostgreSQL
+CREATE TABLE IF NOT EXISTS public.gg_checkpoint (
+    group_name VARCHAR(255) NOT NULL,
+    group_key VARCHAR(255) NOT NULL,
+    seqno BIGINT NOT NULL,
+    rba BIGINT NOT NULL,
+    applied_ts TIMESTAMP,
+    PRIMARY KEY (group_name, group_key)
+);
+```
+
+#### 6.5 Configure postgres.props (if needed)
+If the Replicat requires a properties file, create/edit `dirprm/postgres.props`:
+
+```properties
+gg.handlerlist=postgres
+gg.handler.postgres.type=postgresql
+gg.handler.postgres.connectionURL=jdbc:postgresql://postgres-db:5432/postgres
+gg.handler.postgres.userName=postgres
+gg.handler.postgres.password=postgres
+gg.handler.postgres.batchSize=1000
+```
+
+> **Important**: Always use port `5432` in the connection URL (internal Docker port).
+
+3. Click **Create and Run** or **Submit**
+
+---
+
+### Step 7: Start All Processes
+
+#### 7.1 Start Extract (Oracle Console)
+1. Go to **Extracts** → Click on `EXT_ORA`
+2. Click **Start** button (play icon)
+3. Status should change to **Running** (green)
+
+#### 7.2 Start Distribution Path (Oracle Console)
+1. Go to **Distribution Paths** → Click on `DIST_ORA_PG`
+2. Click **Start**
+3. Status should show **Running**
+
+#### 7.3 Start Replicat (PostgreSQL Console)
+1. Go to **Replicats** → Click on `REP_PG`
+2. Click **Start**
+3. Status should change to **Running**
+
+---
+
+### Step 8: Verify the Data Flow
+
+#### 8.1 Check Process Status on Web UIs
+
+**Oracle Console (https://localhost:9100):**
+- **Extracts** → `EXT_ORA` should show:
+  - Status: `Running`
+  - Lag: Low (ideally < 1 second)
+  - Statistics: Shows records processed
+
+**PostgreSQL Console (https://localhost:9200):**
+- **Replicats** → `REP_PG` should show:
+  - Status: `Running`
+  - Lag: Low
+  - Statistics: Shows records applied
+
+#### 8.2 Monitor on Dashboard
+Both consoles have a **Dashboard** or **Overview** page showing:
+- Process health
+- Throughput graphs
+- Lag metrics
+- Error counts
+
+#### 8.3 Test with Sample Data
+Run the test script:
+
+```bash
+cd scripts
+./test.sh
+```
+
+Or manually test:
+
+```bash
+# Insert test record in Oracle
+docker exec oracle-db bash -c "echo \"INSERT INTO ogguser.CUSTOMERS VALUES (888, 'WebUI', 'Test', 'webui.test@example.com'); COMMIT; EXIT;\" | sqlplus -S system/oracle@//localhost:1521/XE"
+
+# Wait 5-10 seconds, then verify in PostgreSQL
+docker exec postgres-db psql -U postgres -d postgres -c "SELECT * FROM public.customers WHERE id = 888;"
+```
+
+Expected output:
+```
+ id  | first_name | last_name |        email
+-----+------------+-----------+----------------------
+ 888 | WebUI      | Test      | webui.test@example.com
+```
+
+---
+
+### Process Status Reference
+
+| Status | Color | Meaning |
+|--------|-------|---------|
+| Running | Green | Process is active and processing |
+| Stopped | Gray | Process is stopped (manual) |
+| Starting | Yellow | Process is initializing |
+| Abended | Red | Process crashed - check logs |
+
+---
+
+### Quick Troubleshooting During Configuration
+
+#### Extract won't start
+- Check Oracle database connection
+- Verify credentials are correct
+- Check Oracle redo logs are accessible
+- Review Extract report: **Extracts** → `EXT_ORA` → **Report**
+
+#### Distribution Path shows errors
+- Verify target host is reachable: `goldengate-postgres`
+- Check target credentials
+- Ensure target GoldenGate is running
+
+#### Replicat won't start
+- Verify PostgreSQL connection
+- Check checkpoint table exists
+- Verify trail files are being received
+- Review Replicat report: **Replicats** → `REP_PG` → **Report**
+
+#### View Detailed Logs
+- Click on any process → **Details** → **Report** or **Log**
+- Or check container logs: `docker logs goldengate-oracle`
 
 ---
 
 ## Testing CDC
 
-### Test Oracle → PostgreSQL Sync
+### Automated Test
 
-1. **Insert in Oracle:**
 ```bash
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-INSERT INTO CUSTOMERS VALUES (999, 'Test', 'User', 'test@example.com');
-COMMIT;
-EXIT;
-EOF
+cd scripts
+./test.sh
 ```
 
-2. **Verify in PostgreSQL (within 2-3 seconds):**
+### Manual Testing
+
+#### Test INSERT
 ```bash
-docker exec postgres psql -U postgres -d postgres -c "SELECT * FROM public.customers WHERE id = 999;"
+# Insert in Oracle
+docker exec oracle-db bash -c "echo \"INSERT INTO ogguser.CUSTOMERS VALUES (999, 'John', 'Doe', 'john@example.com'); COMMIT; EXIT;\" | sqlplus -S system/oracle@//localhost:1521/XE"
+
+# Check PostgreSQL (wait 5-10 seconds)
+docker exec postgres-db psql -U postgres -d postgres -c "SELECT * FROM public.customers WHERE id = 999;"
 ```
 
-### Test PostgreSQL → Oracle Sync
-
-1. **Insert in PostgreSQL:**
+#### Test UPDATE
 ```bash
-docker exec postgres psql -U postgres -d postgres -c "INSERT INTO public.customers VALUES (888, 'Reverse', 'Sync', 'reverse@test.com');"
+docker exec oracle-db bash -c "echo \"UPDATE ogguser.CUSTOMERS SET FIRST_NAME='Jane' WHERE ID=999; COMMIT; EXIT;\" | sqlplus -S system/oracle@//localhost:1521/XE"
 ```
 
-2. **Verify in Oracle (within 2-3 seconds):**
+#### Test DELETE
 ```bash
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-SELECT * FROM CUSTOMERS WHERE ID=888;
-EXIT;
-EOF
-```
-
-### Monitor Kafka Topics
-
-```bash
-# List all topics
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
-
-# View Oracle CDC events
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic oracle.DBZUSER.CUSTOMERS \
-  --from-beginning
-
-# View PostgreSQL CDC events
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic postgres.public.customers \
-  --from-beginning
+docker exec oracle-db bash -c "echo \"DELETE FROM ogguser.CUSTOMERS WHERE ID=999; COMMIT; EXIT;\" | sqlplus -S system/oracle@//localhost:1521/XE"
 ```
 
 ---
 
 ## Troubleshooting
 
-### Issue 1: Oracle Connector Shows FAILED
-
-**Symptom:** Connector state is FAILED, task shows error
-
-**Check:**
-```bash
-curl -s http://localhost:8083/connectors/oracle-connector/status | jq '.'
-```
-
-**Common Causes:**
-
-#### Missing V$ Permissions
-```sql
--- Connect as SYSDBA
-GRANT SELECT ON V_$LOGMNR_CONTENTS TO DBZUSER;
-GRANT SELECT ON V_$LOGMNR_LOGS TO DBZUSER;
-GRANT SELECT ON V_$LOG TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVED_LOG TO DBZUSER;
-GRANT SELECT ON V_$DATABASE TO DBZUSER;
-GRANT SELECT ON V_$THREAD TO DBZUSER;
-GRANT SELECT ON V_$TRANSACTION TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVE_DEST_STATUS TO DBZUSER;
-GRANT SELECT ON V_$STATNAME TO DBZUSER;
-GRANT SELECT ON V_$MYSTAT TO DBZUSER;
-GRANT EXECUTE_CATALOG_ROLE TO DBZUSER;
-GRANT SELECT ANY TRANSACTION TO DBZUSER;
-GRANT FLASHBACK ANY TABLE TO DBZUSER;
-```
-
-#### ARCHIVELOG Not Enabled
-```sql
--- Check status
-SELECT LOG_MODE FROM V$DATABASE;
-
--- If NOARCHIVELOG, enable it:
-SHUTDOWN IMMEDIATE;
-STARTUP MOUNT;
-ALTER DATABASE ARCHIVELOG;
-ALTER DATABASE OPEN;
-```
-
-#### Supplemental Logging Not Enabled
-```sql
--- Enable at database level
-ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
-
--- Enable at table level
-ALTER TABLE DBZUSER.CUSTOMERS ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
-
--- Verify
-SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V$DATABASE;
-SELECT TABLE_NAME, LOG_GROUP_NAME FROM USER_LOG_GROUPS WHERE TABLE_NAME='CUSTOMERS';
-```
-
-### Issue 2: No Kafka Topics Created
-
-**Symptom:** Connector is RUNNING but no topics appear
-
-**Check:**
-```bash
-# Check connector status
-curl -s http://localhost:8083/connectors/oracle-connector/status
-
-# Check Debezium logs
-docker logs debezium-connect --tail 100 | grep -i oracle
-```
-
-**Solution:**
-```bash
-# Force redo log switch
-docker exec oracle-db sqlplus / as sysdba <<EOF
-ALTER SYSTEM SWITCH LOGFILE;
-ALTER SYSTEM CHECKPOINT;
-EXIT;
-EOF
-
-# Insert a test record
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-INSERT INTO CUSTOMERS VALUES (777, 'Force', 'Topic', 'force@test.com');
-COMMIT;
-EXIT;
-EOF
-
-# Wait 15 seconds and check topics
-sleep 15
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list | grep oracle
-```
-
-### Issue 3: Spring Boot Application Errors
-
-**Error:** `ORA-00903: invalid table name` when querying `public.customers`
-
-**Cause:** PostgreSQL table doesn't exist
-
-**Solution:**
-```bash
-docker exec postgres psql -U postgres -d postgres <<EOF
-CREATE TABLE IF NOT EXISTS public.customers (
-    id BIGINT PRIMARY KEY,
-    first_name VARCHAR(255),
-    last_name VARCHAR(255),
-    email VARCHAR(255)
-);
-EOF
-```
-
-### Issue 4: "No changes will be captured" Warning
-
-**Symptom:** Debezium logs show "After applying the include/exclude list filters, no changes will be captured"
-
-**Cause:** Using SYSTEM schema which Debezium filters out
-
-**Solution:** Use DBZUSER schema (already configured in this project)
-
-### Check Overall Health
+### Container Won't Start
 
 ```bash
-cd scripts
-./health-check.sh
+# Check logs
+docker logs goldengate-oracle
+docker logs goldengate-postgres
+
+# Restart with fresh volumes
+docker-compose down -v
+docker-compose up -d
 ```
 
-This script verifies:
-- ✓ All Docker containers running
-- ✓ Kafka accessible
-- ✓ Databases accessible
-- ✓ Tables exist with correct structure
-- ✓ Connectors registered and RUNNING
-- ✓ Spring Boot application ready
+### "Service Manager already running" Error
+
+This happens when volumes have stale state:
+```bash
+docker-compose down
+docker volume rm cdc-sync-service_ogg_oracle_data cdc-sync-service_ogg_postgres_data
+docker-compose up -d
+```
+
+### Web UI Shows 401 Unauthorized
+
+- Clear browser cache
+- Use incognito/private window
+- Try credentials: `oggadmin` / `Welcome1!`
+
+### Replication Not Working
+
+1. Check GoldenGate services are running:
+   ```bash
+   ./scripts/monitor.sh
+   ```
+
+2. Verify Extract/Replicat processes are configured via Web UI
+
+3. Check database connectivity:
+   ```bash
+   # Oracle
+   docker exec oracle-db sqlplus system/oracle@//localhost:1521/XE
+   
+   # PostgreSQL
+   docker exec postgres-db psql -U postgres -d postgres
+   ```
+
+### Oracle Container Registry Auth Failed
+
+```bash
+docker logout container-registry.oracle.com
+docker login container-registry.oracle.com
+```
 
 ---
 
-## How It Works
+## Useful Commands
 
-### Oracle CDC with LogMiner
+### Docker Management
 
-1. **ARCHIVELOG Mode**: Oracle writes all changes to redo logs in archive mode
-2. **Supplemental Logging**: Enriches redo logs with before/after column values
-3. **LogMiner**: Debezium queries `V$LOGMNR_CONTENTS` to read redo log entries
-4. **Change Extraction**: Converts redo log entries to CDC events
-5. **Kafka Publishing**: Publishes events to `oracle.DBZUSER.CUSTOMERS` topic
+```bash
+# Start/Stop
+docker-compose up -d
+docker-compose down
+docker-compose restart goldengate-oracle
 
-### PostgreSQL CDC with pgoutput
-
-1. **Logical Replication**: PostgreSQL WAL contains logical change records
-2. **Replication Slot**: Debezium creates a slot to track position
-3. **Publication**: Defines which tables to capture
-4. **Event Extraction**: Reads WAL and converts to CDC events
-5. **Kafka Publishing**: Publishes events to `postgres.public.customers` topic
-
-### Spring Boot Event Processing
-
-#### Oracle → PostgreSQL
-
-```java
-@KafkaListener(topics = "oracle.DBZUSER.CUSTOMERS")
-public void handleOracleChange(ConsumerRecord<String, String> record) {
-    // Parse CDC event
-    JsonNode root = objectMapper.readTree(record.value());
-    String op = root.get("op").asText(); // c=create, u=update, d=delete
-    
-    // Extract data (Oracle uses UPPERCASE columns)
-    JsonNode after = root.get("after");
-    Long id = after.get("ID").asLong();
-    String firstName = after.get("FIRST_NAME").asText();
-    
-    // Save to PostgreSQL using JPA
-    customerRepository.save(customer);
-}
+# Logs
+docker logs -f goldengate-oracle
+docker logs -f goldengate-postgres
 ```
 
-#### PostgreSQL → Oracle
+### Database Access
 
-```java
-@KafkaListener(topics = "postgres.public.customers")
-public void handlePostgresChange(ConsumerRecord<String, String> record) {
-    // Parse CDC event
-    JsonNode root = objectMapper.readTree(record.value());
-    
-    // Extract data (PostgreSQL uses lowercase columns)
-    JsonNode after = root.get("after");
-    Long id = after.get("id").asLong();
-    
-    // Upsert to Oracle using JDBC
-    String sql = "MERGE INTO DBZUSER.CUSTOMERS c USING (...) s ON (c.ID = s.ID) ...";
-    oracleJdbcTemplate.update(sql, id, firstName, lastName, email);
-}
+```bash
+# Oracle SQL*Plus
+docker exec -it oracle-db sqlplus ogguser/oggpassword@//localhost:1521/XE
+
+# PostgreSQL psql
+docker exec -it postgres-db psql -U postgres -d postgres
+
+# From host (PostgreSQL)
+psql -h localhost -p 5434 -U postgres -d postgres
 ```
 
-### CDC Event Format
+### Quick Queries
 
-Debezium CDC events follow this structure:
+```bash
+# Count rows in Oracle
+docker exec oracle-db bash -c "echo 'SELECT COUNT(*) FROM ogguser.CUSTOMERS; EXIT;' | sqlplus -S system/oracle@//localhost:1521/XE"
 
-```json
-{
-  "before": { "ID": 1, "FIRST_NAME": "John", ... },
-  "after": { "ID": 1, "FIRST_NAME": "Jane", ... },
-  "source": {
-    "version": "2.7.4.Final",
-    "connector": "oracle",
-    "name": "oracle",
-    "ts_ms": 1768123456789,
-    "snapshot": "false",
-    "db": "XE",
-    "schema": "DBZUSER",
-    "table": "CUSTOMERS",
-    "scn": 5027093
-  },
-  "op": "u",  // c=create, u=update, d=delete, r=read(snapshot)
-  "ts_ms": 1768123456789
-}
+# Count rows in PostgreSQL
+docker exec postgres-db psql -U postgres -d postgres -c "SELECT COUNT(*) FROM public.customers;"
+
+# Compare data
+docker exec postgres-db psql -U postgres -d postgres -c "SELECT * FROM public.customers ORDER BY id;"
 ```
 
 ---
@@ -500,195 +707,52 @@ Debezium CDC events follow this structure:
 
 ```
 cdc-sync-service/
-├── src/main/java/com/accessbank/cdc/
-│   ├── CdcSyncServiceApplication.java    # Spring Boot main class
-│   ├── config/
-│   │   └── DataSourceConfig.java         # Oracle + PostgreSQL datasource config
-│   ├── model/
-│   │   └── Customer.java                 # JPA entity
-│   ├── repository/
-│   │   └── CustomerRepository.java       # Spring Data JPA repository
-│   └── service/
-│       └── CdcEventHandler.java          # Kafka listener & CDC logic
-├── src/main/resources/
-│   └── application.yml                    # Application configuration
-├── connectors/
-│   ├── oracle-connector.json             # Debezium Oracle connector config
-│   └── postgres-connector.json           # Debezium PostgreSQL connector config
+├── docker-compose.yml          # Main Docker Compose configuration
+├── README.md                   # This file
+├── Dockerfile                  # Spring Boot app (optional)
+├── build.gradle               # Gradle build
 ├── scripts/
-│   ├── setup-oracle.sql                  # Oracle setup script
-│   ├── setup-postgres.sql                # PostgreSQL setup script
-│   ├── register-connectors.sh            # Register Debezium connectors
-│   └── health-check.sh                   # Health check script
-├── docker-compose.yml                     # All services configuration
-├── build.gradle                          # Gradle build file
-└── README.md                             # This file
+│   ├── setup.sh               # Complete setup script
+│   ├── monitor.sh             # Health monitoring
+│   ├── test.sh                # CDC testing
+│   ├── manage.sh              # Service management
+│   ├── setup-oracle.sql       # Oracle database setup
+│   ├── setup-postgres.sql     # PostgreSQL database setup
+│   ├── ogg-oracle/            # Oracle GoldenGate configs
+│   │   ├── mgr.prm
+│   │   ├── ext_oracle.prm
+│   │   └── pump_oracle.prm
+│   └── ogg-postgres/          # PostgreSQL GoldenGate configs
+│       ├── mgr.prm
+│       ├── rep_postgres.prm
+│       └── postgres.props
+└── src/                       # Spring Boot application (optional)
 ```
 
 ---
 
-## API Endpoints
-
-### Debezium Connect REST API
+## Cleanup
 
 ```bash
-# List all connectors
-curl http://localhost:8083/connectors
+# Stop services (keep data)
+docker-compose down
 
-# Check connector status
-curl http://localhost:8083/connectors/oracle-connector/status
+# Remove everything including data
+docker-compose down -v
 
-# Get connector configuration
-curl http://localhost:8083/connectors/oracle-connector
-
-# Delete connector
-curl -X DELETE http://localhost:8083/connectors/oracle-connector
-
-# Register connector
-curl -X POST http://localhost:8083/connectors \
-  -H "Content-Type: application/json" \
-  -d @connectors/oracle-connector.json
+# Remove images
+docker rmi container-registry.oracle.com/goldengate/goldengate-oracle-free:latest
+docker rmi container-registry.oracle.com/goldengate/goldengate-postgresql-free:latest
 ```
-
-### Spring Boot Application
-
-The application runs on port **8080** and provides:
-- Health check: `http://localhost:8080/actuator/health`
-- Metrics: `http://localhost:8080/actuator/metrics`
-
----
-
-## Performance Tuning
-
-### Oracle LogMiner
-
-Adjust in `connectors/oracle-connector.json`:
-
-```json
-{
-  "log.mining.batch.size.default": "1000",
-  "log.mining.sleep.time.default.ms": "1000",
-  "log.mining.view.fetch.size": "10000"
-}
-```
-
-### Kafka Consumer
-
-Adjust in `application.yml`:
-
-```yaml
-spring:
-  kafka:
-    consumer:
-      max-poll-records: 500
-      fetch-min-size: 1024
-      fetch-max-wait-ms: 500
-```
-
----
-
-## Security Considerations
-
-### Production Recommendations
-
-1. **Change Default Passwords:**
-   - Oracle: `dbzuser/dbzpassword`
-   - PostgreSQL: `postgres/postgres`
-   - Kafka: Enable SASL authentication
-
-2. **Network Security:**
-   - Use private networks
-   - Enable SSL/TLS for all connections
-   - Restrict port access
-
-3. **Oracle Permissions:**
-   - Grant only necessary V$ views
-   - Use dedicated CDC user (not SYSTEM or SYS)
-   - Enable auditing
-
-4. **Kafka Security:**
-   - Enable authentication (SASL)
-   - Enable encryption (SSL)
-   - Configure ACLs for topic access
-
----
-
-## Limitations
-
-1. **Schema Changes**: Schema evolution is not automatically handled. Requires manual connector restart.
-2. **Large Transactions**: Very large transactions may cause memory issues. Monitor heap usage.
-3. **Oracle XE**: Limited to 2 CPU threads and 2GB RAM. Use Oracle EE for production.
-4. **Data Types**: Complex types (CLOB, BLOB, custom types) may require special handling.
-5. **Conflict Resolution**: Last-write-wins strategy. No automatic conflict detection.
 
 ---
 
 ## License
 
-This project is for demonstration purposes. Adjust as needed for your use case.
+- **Oracle GoldenGate Free Edition** - Free for development and production
+- **Oracle Database XE** - Free for development
+- **PostgreSQL** - Open Source (PostgreSQL License)
 
 ---
 
-## Support
-
-For issues or questions:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review Debezium logs: `docker logs debezium-connect`
-3. Check connector status: `curl http://localhost:8083/connectors/oracle-connector/status`
-4. Run health check: `./scripts/health-check.sh`
-
----
-
-## Useful Commands Reference
-
-```bash
-# Start all services
-docker-compose up -d
-
-# Stop all services
-docker-compose down
-
-# View logs
-docker logs oracle-db
-docker logs postgres
-docker logs kafka
-docker logs debezium-connect
-
-# Restart a service
-docker-compose restart connect
-
-# Execute SQL in Oracle
-docker exec -it oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE
-
-# Execute SQL in PostgreSQL
-docker exec -it postgres psql -U postgres -d postgres
-
-# List Kafka topics
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
-
-# Consume from topic
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic oracle.DBZUSER.CUSTOMERS \
-  --from-beginning
-
-# Check connector status
-curl -s http://localhost:8083/connectors/oracle-connector/status | jq '.'
-
-# Register connector
-cd scripts && ./register-connectors.sh
-
-# Health check
-cd scripts && ./health-check.sh
-
-# Build application
-./gradlew clean build
-
-# Run application
-./gradlew bootRun
-```
-
----
-
-**Last Updated:** January 11, 2026
-
+**Last Updated**: January 20, 2026

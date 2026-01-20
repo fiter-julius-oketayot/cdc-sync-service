@@ -17,24 +17,15 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
     open-in-view: false
 
-  kafka:
-    bootstrap-servers: localhost:9092
-    consumer:
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      # We handle JSON manually with Jackson
-      properties:
-        spring.json.trusted.packages: "*"
-
 oracle:
   datasource:
     jdbc-url: jdbc:oracle:thin:@localhost:1521/XE
-    username: dbzuser
-    password: dbzpassword
+    username: ogguser
+    password: oggpassword
     driver-class-name: oracle.jdbc.OracleDriver
 
 logging:
   level:
     root: INFO
     com.accessbank.cdc: DEBUG
-    org.apache.kafka.clients.consumer: INFO
+

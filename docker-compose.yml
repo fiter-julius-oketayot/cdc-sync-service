@@ -1,91 +1,141 @@
-services:
-  kafka:
-    image: apache/kafka:3.9.1
-    hostname: kafka
-    container_name: kafka
-    ports:
-      - 9092:9092
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://host.docker.internal:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_NODE_ID: 1
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
-      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
-      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+# Oracle GoldenGate CDC Implementation (FREE Edition)
+# This project uses Oracle GoldenGate Free Edition for Change Data Capture
+#
+# IMPORTANT: Before running docker-compose up, you must login to Oracle Container Registry:
+#   docker login container-registry.oracle.com
+#   Username: Your Oracle Account Email
+#   Password: Your Oracle Account Auth Token
+#
+# To create an Auth Token:
+#   1. Go to https://container-registry.oracle.com
+#   2. Accept the Oracle Standard Terms and Restrictions for GoldenGate
+#   3. Sign in with your Oracle account
+#   4. Click your profile -> User Settings -> Auth Tokens -> Generate Token
+#
+# Note: GoldenGate Free Edition is FREE for both development and production use!
 
-  postgres:
+services:
+  # PostgreSQL Target Database
+  postgres-db:
     image: postgres:16
-    container_name: postgres
+    container_name: postgres-db
+    hostname: postgres-db
     ports:
-      - "5433:5432" # host:container
+      - "5434:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
-    command:
-      - "postgres"
-      - "-c"
-      - "wal_level=logical"
-      - "-c"
-      - "max_replication_slots=4"
-      - "-c"
-      - "max_wal_senders=4"
+    # Configure PostgreSQL for logical replication so existing slots like
+    # "debezium_postgres_slot" work correctly
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./scripts/setup-postgres.sql:/docker-entrypoint-initdb.d/setup.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ogg-network
 
-  oracle:
+  # Oracle Source Database
+  oracle-db:
     image: gvenzl/oracle-xe:21-slim
     container_name: oracle-db
+    hostname: oracle-db
     environment:
       ORACLE_PASSWORD: oracle
       ORACLE_DATABASE: XE
       ORACLE_CHARACTERSET: AL32UTF8
     ports:
       - "1521:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./scripts:/setup-scripts
     healthcheck:
       test: ["CMD", "sqlplus", "sys/oracle@//localhost:1521/XE", "as", "sysdba", "-V"]
       interval: 30s
       timeout: 10s
       retries: 10
+    networks:
+      - ogg-network
 
-  connect:
-    image: quay.io/debezium/connect:2.7
-    container_name: debezium-connect
-    depends_on:
-      - kafka
-      - postgres
-      - oracle
-    ports:
-      - "8083:8083"
+  # Oracle GoldenGate for Oracle (Extract/Pump)
+  goldengate-oracle:
+    # Using Oracle GoldenGate Free Edition for Oracle
+    # Requires login: docker login container-registry.oracle.com
+    # License: Free for development and production use
+    image: container-registry.oracle.com/goldengate/goldengate-oracle-free:latest
+    container_name: goldengate-oracle
+    hostname: goldengate-oracle
+    restart: unless-stopped
     environment:
-      BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: 1
-      CONFIG_STORAGE_TOPIC: connect-configs
-      OFFSET_STORAGE_TOPIC: connect-offsets
-      STATUS_STORAGE_TOPIC: connect-status
-      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      STATUS_STORAGE_REPLICATION_FACTOR: 1
-      # Oracle LogMiner settings
-      LOG_LEVEL: INFO
-      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
-      CONNECT_LOG4J_LOGGERS: io.debezium=DEBUG
+      OGG_SCHEMA: oggadmin
+      OGG_ADMIN: oggadmin
+      OGG_ADMIN_PWD: Welcome1!
+      OGG_DEPLOYMENT: Local
+      ORACLE_SID: XE
+      ORACLE_HOME: /opt/oracle/product/21c/dbhomeXE
+    ports:
+      - "9100:443"  # GoldenGate Web UI (HTTPS)
+      - "7809:7809" # Manager port
+    volumes:
+      - ogg_oracle_data:/u02/ogg
+      - ./scripts/ogg-oracle:/setup-scripts
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    networks:
+      - ogg-network
+    # The web UI should be available on port 9100 (HTTPS)
+
+  # Oracle GoldenGate for PostgreSQL (Replicat)
+  goldengate-postgres:
+    # Using Oracle GoldenGate Free Edition for PostgreSQL
+    # Requires login: docker login container-registry.oracle.com
+    # License: Free for development and production use
+    image: container-registry.oracle.com/goldengate/goldengate-postgresql-free:latest
+    container_name: goldengate-postgres
+    hostname: goldengate-postgres
+    restart: unless-stopped
+    environment:
+      OGG_SCHEMA: oggadmin
+      OGG_ADMIN: oggadmin
+      OGG_ADMIN_PWD: Welcome1!
+      OGG_DEPLOYMENT: Local
+    ports:
+      - "9200:443"  # GoldenGate Web UI (HTTPS)
+      - "7810:7809" # Manager port
+    volumes:
+      - ogg_postgres_data:/u02/ogg
+      - ./scripts/ogg-postgres:/setup-scripts
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    networks:
+      - ogg-network
+    # The web UI should be available on port 9200 (HTTPS)
+
+networks:
+  ogg-network:
+    driver: bridge
 
 volumes:
   postgres_data:
     driver: local
+  oracle_data:
+    driver: local
+  ogg_oracle_data:
+    driver: local
+  ogg_oracle_etc:
+    driver: local
+  ogg_postgres_data:
+    driver: local
+  ogg_postgres_etc:
+    driver: local
+
+
 
 

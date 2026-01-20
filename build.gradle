@@ -16,20 +16,19 @@ repositories {
 }
 
 dependencies {
-    // Rely on Spring Boot's dependency management; no explicit versions for starters
+    // Spring Boot core dependencies
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    // Use Spring for Apache Kafka; Spring Boot manages the version via its dependency management
-    implementation 'org.springframework.kafka:spring-kafka'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 
+    // Database drivers
     runtimeOnly 'org.postgresql:postgresql'
-
-    // Oracle JDBC driver for XE (ensure this artifact is resolvable from your repos)
     implementation 'com.oracle.database.jdbc:ojdbc11:23.3.0.23.09'
 
+    // JSON processing
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 
+    // Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
