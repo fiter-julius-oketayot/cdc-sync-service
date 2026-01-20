@@ -1,0 +1,29 @@
+-- Oracle GoldenGate Replicat Parameter File for PostgreSQL
+-- This applies changes to PostgreSQL target database
+-- File: rep_postgres.prm
+
+REPLICAT rep_postgres
+
+-- PostgreSQL connection via ODBC
+TARGETDB LIBFILE libggjava.so SET property=dirprm/postgres.props
+
+-- Discard file for errors
+DISCARDFILE ./dirrpt/rep_postgres.dsc, PURGE
+
+-- Map Oracle schema to PostgreSQL schema
+MAP ogguser.CUSTOMERS, TARGET public.customers, COLMAP (
+    id = ID,
+    first_name = FIRST_NAME,
+    last_name = LAST_NAME,
+    email = EMAIL
+);
+
+-- Error handling
+REPERROR (DEFAULT, EXCEPTION)
+HANDLECOLLISIONS
+
+-- Performance
+BATCHSQL
+GROUPTRANSOPS 10000
+MAXTRANSOPS 50000
+

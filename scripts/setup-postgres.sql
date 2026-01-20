@@ -1,43 +1,48 @@
--- =====================================================
--- PostgreSQL Database Setup for Debezium CDC (Simplified)
--- =====================================================
--- Run this as postgres user
--- Connect: psql -U postgres -d postgres -h localhost -p 5433
---
--- This simplified version uses only the public schema
--- No separate inventory schema needed
+-- Oracle GoldenGate Setup Script for PostgreSQL Target Database
+-- This script creates the necessary tables and users for OGG replication
 
--- Note: PostgreSQL is already configured for logical replication in docker-compose.yml
--- command: postgres -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4
-
--- Step 1: Verify WAL level (should be 'logical')
-SHOW wal_level;
-
--- Step 2: Drop table if exists (for idempotency)
-DROP TABLE IF EXISTS public.customers;
-
--- Step 3: Create CUSTOMERS table in public schema
-CREATE TABLE public.customers (
-                                  id BIGINT PRIMARY KEY,
-                                  first_name VARCHAR(255),
-                                  last_name VARCHAR(255),
-                                  email VARCHAR(255)
+-- Create customers table matching Oracle structure
+CREATE TABLE IF NOT EXISTS public.customers (
+    id BIGINT PRIMARY KEY,
+    first_name VARCHAR(255),
+    last_name VARCHAR(255),
+    email VARCHAR(255)
 );
 
--- Step 4: Set replica identity to FULL
--- This ensures Debezium captures all column values in UPDATE events
-ALTER TABLE public.customers REPLICA IDENTITY FULL;
+-- Create GoldenGate checkpoint table
+CREATE TABLE IF NOT EXISTS public.gg_checkpoint (
+    group_name VARCHAR(255) NOT NULL,
+    group_key VARCHAR(255) NOT NULL,
+    seqno BIGINT NOT NULL,
+    rba BIGINT NOT NULL,
+    applied_ts TIMESTAMP,
+    PRIMARY KEY (group_name, group_key)
+);
 
--- Step 5: Insert sample data for testing
-INSERT INTO public.customers (id, first_name, last_name, email)
-VALUES (1, 'Alice', 'Williams', 'alice.williams@example.com');
-INSERT INTO public.customers (id, first_name, last_name, email)
-VALUES (2, 'Charlie', 'Brown', 'charlie.brown@example.com');
-INSERT INTO public.customers (id, first_name, last_name, email)
-VALUES (3, 'Diana', 'Davis', 'diana.davis@example.com');
+-- Create user for GoldenGate (if needed)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_user WHERE username = 'oggadmin') THEN
+        CREATE USER oggadmin WITH PASSWORD 'Welcome1';
+    END IF;
+END
+$$;
 
--- Step 6: Verify setup
-SELECT * FROM public.customers;
-SELECT schemaname, tablename, * FROM pg_tables WHERE tablename = 'customers';
+GRANT ALL PRIVILEGES ON TABLE public.customers TO oggadmin;
+GRANT ALL PRIVILEGES ON TABLE public.gg_checkpoint TO oggadmin;
+GRANT ALL PRIVILEGES ON SCHEMA public TO oggadmin;
 
+-- Enable PostgreSQL logical replication (for reverse sync via Debezium/custom app)
+ALTER SYSTEM SET wal_level = logical;
+ALTER SYSTEM SET max_replication_slots = 4;
+ALTER SYSTEM SET max_wal_senders = 4;
+
+-- Verify setup
+\dt public.customers
+\dt public.gg_checkpoint
+
+-- Show table structure
+\d public.customers
+
+SELECT 'PostgreSQL setup complete for Oracle GoldenGate' AS status;
 

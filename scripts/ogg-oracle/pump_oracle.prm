@@ -1,0 +1,21 @@
+-- Oracle GoldenGate Data Pump Parameter File
+-- This pumps data from Extract trail to remote PostgreSQL GoldenGate
+-- File: pump_oracle.prm
+
+EXTRACT pump_oracle
+USERID oggadmin, PASSWORD Welcome1
+
+-- Remote host configuration
+RMTHOST goldengate-postgres, MGRPORT 7809
+RMTTRAIL ./dirdat/rt
+
+-- Pass through all DDL
+PASSTHRU
+
+-- Table mapping (same as Extract)
+TABLE ogguser.CUSTOMERS;
+
+-- Performance settings
+DYNAMICRESOLUTION
+MAXCOMMITPROPAGATIONDELAY 5000
+

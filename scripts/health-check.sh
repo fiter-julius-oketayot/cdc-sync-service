@@ -1,195 +1,302 @@
 #!/bin/bash
-# =====================================================
-# CDC System Health Check
-# =====================================================
 
-echo "=================================================="
-echo "CDC System Health Check"
-echo "=================================================="
+# Oracle GoldenGate Health Check Script
+# This script performs a comprehensive health check of the GoldenGate setup
 
-all_healthy=true
-
-# Check Docker container
-check_container() {
-    local container=$1
-    echo ""
-    echo "Checking Docker Container: $container..."
-
-    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
-        status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null)
-        if [ "$status" = "running" ]; then
-            echo "[OK] Container is running"
-            return 0
-        else
-            echo "[FAILED] Container status: $status"
-            all_healthy=false
-            return 1
-        fi
-    else
-        echo "[FAILED] Container not found"
-        all_healthy=false
-        return 1
-    fi
-}
-
-# Check Kafka
-check_kafka() {
-    echo ""
-    echo "Checking Kafka..."
-
-    # Try listing topics with timeout
-    if timeout 5 docker exec kafka kafka-topics --bootstrap-server kafka:29092 --list > /dev/null 2>&1; then
-        echo "[OK] Kafka is accessible"
-        return 0
-    elif timeout 5 docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1; then
-        echo "[OK] Kafka is accessible"
-        return 0
-    else
-        echo "[WARNING] Kafka topic listing failed (may be slow to start)"
-        echo "Note: If connectors are RUNNING, Kafka is working fine"
-        return 0
-    fi
-}
-
-# Check PostgreSQL
-check_postgres() {
-    echo ""
-    echo "Checking PostgreSQL..."
-
-    if docker exec postgres psql -U postgres -d postgres -c "SELECT 1" > /dev/null 2>&1; then
-        echo "[OK] PostgreSQL is accessible"
-
-        # Check WAL level
-        wal_level=$(docker exec postgres psql -U postgres -d postgres -t -c "SHOW wal_level;" 2>/dev/null | xargs)
-        if [ "$wal_level" = "logical" ]; then
-            echo "[OK] WAL level is logical"
-        else
-            echo "[WARNING] WAL level is not logical: $wal_level"
-        fi
-
-        # Check if public schema has customers table
-        if docker exec postgres psql -U postgres -d postgres -t -c "SELECT 1 FROM public.customers LIMIT 1" > /dev/null 2>&1; then
-            echo "[OK] public.customers table exists"
-        else
-            echo "[WARNING] public.customers table not found"
-        fi
-
-        return 0
-    else
-        echo "[FAILED] PostgreSQL connection error"
-        all_healthy=false
-        return 1
-    fi
-}
-
-# Check Oracle
-check_oracle() {
-    echo ""
-    echo "Checking Oracle..."
-
-    if echo "SELECT 1 FROM DUAL;" | docker exec -i oracle-db sqlplus -s system/oracle@//localhost:1521/XE > /dev/null 2>&1; then
-        echo "[OK] Oracle is accessible"
-
-        # Check if SYSTEM.CUSTOMERS table exists
-        if echo "SELECT 1 FROM SYSTEM.CUSTOMERS WHERE ROWNUM = 1;" | docker exec -i oracle-db sqlplus -s system/oracle@//localhost:1521/XE > /dev/null 2>&1; then
-            echo "[OK] SYSTEM.CUSTOMERS table exists"
-        else
-            echo "[WARNING] SYSTEM.CUSTOMERS table not found"
-        fi
-
-        return 0
-    else
-        echo "[FAILED] Oracle is not accessible"
-        echo "Note: Oracle may still be starting up"
-        all_healthy=false
-        return 1
-    fi
-}
-
-# Check Debezium Connect
-check_debezium() {
-    echo ""
-    echo "Checking Debezium Connect..."
-
-    if response=$(curl -s "http://localhost:8083/"); then
-        if echo "$response" | grep -q "version"; then
-            echo "[OK] Debezium Connect is accessible"
-
-            # Check connectors
-            connectors=$(curl -s "http://localhost:8083/connectors")
-            connector_count=$(echo "$connectors" | grep -o '"[^"]*"' | wc -l)
-            echo "Registered connectors: $connector_count"
-
-            if [ $connector_count -gt 0 ]; then
-                for connector in $(echo $connectors | grep -o '"[^"]*"' | tr -d '"'); do
-                    status=$(curl -s "http://localhost:8083/connectors/$connector/status")
-                    state=$(echo "$status" | grep -o '"state":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-                    if [ "$state" = "RUNNING" ]; then
-                        echo "  [OK] $connector is RUNNING"
-                    else
-                        echo "  [WARNING] $connector is $state"
-                        all_healthy=false
-                    fi
-                done
-            else
-                echo "[WARNING] No connectors registered"
-            fi
-
-            return 0
-        fi
-    fi
-
-    echo "[FAILED] Debezium Connect is not accessible"
-    all_healthy=false
-    return 1
-}
-
-# Check Spring Boot application
-check_springboot() {
-    echo ""
-    echo "Checking Spring Boot Application..."
-
-    if nc -z localhost 8080 2>/dev/null || (echo > /dev/tcp/localhost/8080) 2>/dev/null; then
-        echo "[OK] Spring Boot application is running on port 8080"
-        return 0
-    else
-        echo "[WARNING] Spring Boot application is not running"
-        echo "Run: ./gradlew bootRun"
-        return 1
-    fi
-}
-
-# Run all checks
+echo "============================================"
+echo "Oracle GoldenGate Health Check"
+echo "============================================"
 echo ""
-echo "==================== INFRASTRUCTURE ===================="
-check_container "kafka"
-check_container "postgres"
-check_container "oracle-db"
-check_container "debezium-connect"
+
+PASS=0
+FAIL=0
+WARN=0
+
+check_status() {
+    if [ $1 -eq 0 ]; then
+        echo "  ✓ PASS: $2"
+        ((PASS++))
+    else
+        echo "  ✗ FAIL: $2"
+        ((FAIL++))
+    fi
+}
+
+check_warning() {
+    if [ $1 -eq 0 ]; then
+        echo "  ✓ OK: $2"
+        ((PASS++))
+    else
+        echo "  ⚠ WARNING: $2"
+        ((WARN++))
+    fi
+}
+
+echo "Step 1: Checking Docker Containers..."
+echo "--------------------------------------"
+
+docker ps --format "table {{.Names}}\t{{.Status}}" | grep ogg
+
+docker ps | grep -q ogg-oracle
+check_status $? "Oracle container is running"
+
+docker ps | grep -q ogg-postgres
+check_status $? "PostgreSQL container is running"
+
+docker ps | grep -q ogg-oracle-extract
+check_status $? "GoldenGate Oracle Extract container is running"
+
+docker ps | grep -q ogg-postgres-replicat
+check_status $? "GoldenGate PostgreSQL Replicat container is running"
 
 echo ""
-echo "==================== SERVICES ===================="
-check_kafka
-check_postgres
-check_oracle
-check_debezium
+echo "Step 2: Checking Oracle Database..."
+echo "------------------------------------"
+
+# Check if Oracle is accessible
+docker exec ogg-oracle sqlplus -S / as sysdba << EOF > /tmp/ogg_health_oracle.txt 2>&1
+SELECT 'ORACLE_ACCESSIBLE' FROM DUAL;
+EXIT;
+EOF
+
+grep -q "ORACLE_ACCESSIBLE" /tmp/ogg_health_oracle.txt
+check_status $? "Oracle database is accessible"
+
+# Check ARCHIVELOG mode
+ARCHIVELOG_MODE=$(docker exec ogg-oracle sqlplus -S / as sysdba << EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF ECHO OFF
+SELECT LOG_MODE FROM V\$DATABASE;
+EXIT;
+EOF
+)
+
+if [[ "$ARCHIVELOG_MODE" == *"ARCHIVELOG"* ]]; then
+    echo "  ✓ PASS: ARCHIVELOG mode is enabled"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: ARCHIVELOG mode is NOT enabled (required for GoldenGate)"
+    ((FAIL++))
+fi
+
+# Check supplemental logging
+SUPP_LOG=$(docker exec ogg-oracle sqlplus -S / as sysdba << EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF ECHO OFF
+SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V\$DATABASE;
+EXIT;
+EOF
+)
+
+if [[ "$SUPP_LOG" == *"YES"* ]]; then
+    echo "  ✓ PASS: Supplemental logging is enabled"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: Supplemental logging is NOT enabled"
+    ((FAIL++))
+fi
+
+# Check if CUSTOMERS table exists
+TABLE_COUNT=$(docker exec ogg-oracle sqlplus -S ogguser/oggpassword@//localhost:1521/XE << EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF ECHO OFF
+SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME='CUSTOMERS';
+EXIT;
+EOF
+)
+
+if [[ "$TABLE_COUNT" -ge 1 ]]; then
+    echo "  ✓ PASS: OGGUSER.CUSTOMERS table exists"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: OGGUSER.CUSTOMERS table does not exist"
+    ((FAIL++))
+fi
 
 echo ""
-echo "==================== APPLICATION ===================="
-check_springboot
+echo "Step 3: Checking PostgreSQL Database..."
+echo "---------------------------------------"
 
-# Summary
+# Check if PostgreSQL is accessible
+docker exec ogg-postgres psql -U postgres -d postgres -c "SELECT 1;" > /tmp/ogg_health_pg.txt 2>&1
+check_status $? "PostgreSQL database is accessible"
+
+# Check if customers table exists
+docker exec ogg-postgres psql -U postgres -d postgres -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='customers' AND table_schema='public';" > /tmp/ogg_pg_table.txt 2>&1
+PG_TABLE_COUNT=$(cat /tmp/ogg_pg_table.txt | tr -d ' ')
+
+if [[ "$PG_TABLE_COUNT" -ge 1 ]]; then
+    echo "  ✓ PASS: public.customers table exists"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: public.customers table does not exist"
+    ((FAIL++))
+fi
+
+# Check checkpoint table
+docker exec ogg-postgres psql -U postgres -d postgres -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='gg_checkpoint';" > /tmp/ogg_pg_ckpt.txt 2>&1
+PG_CKPT_COUNT=$(cat /tmp/ogg_pg_ckpt.txt | tr -d ' ')
+
+if [[ "$PG_CKPT_COUNT" -ge 1 ]]; then
+    echo "  ✓ PASS: GoldenGate checkpoint table exists"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: GoldenGate checkpoint table missing"
+    ((WARN++))
+fi
+
 echo ""
-echo "=================================================="
-echo "HEALTH CHECK SUMMARY"
-echo "=================================================="
+echo "Step 4: Checking GoldenGate Processes..."
+echo "----------------------------------------"
 
-if $all_healthy; then
-    echo "All systems operational! ✓"
+# Check Oracle GoldenGate Manager
+docker exec ogg-oracle-extract bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+INFO MGR
+EXIT
+EOF" > /tmp/ogg_mgr_oracle.txt 2>&1
+
+if grep -q "RUNNING" /tmp/ogg_mgr_oracle.txt; then
+    echo "  ✓ PASS: Oracle Manager is RUNNING"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: Oracle Manager is not running"
+    ((WARN++))
+fi
+
+# Check Extract
+docker exec ogg-oracle-extract bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+INFO EXTRACT ext_oracle
+EXIT
+EOF" > /tmp/ogg_extract.txt 2>&1
+
+if grep -q "RUNNING" /tmp/ogg_extract.txt; then
+    echo "  ✓ PASS: Extract is RUNNING"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: Extract is NOT running"
+    ((FAIL++))
+fi
+
+# Check Pump
+docker exec ogg-oracle-extract bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+INFO EXTRACT pump_oracle
+EXIT
+EOF" > /tmp/ogg_pump.txt 2>&1
+
+if grep -q "RUNNING" /tmp/ogg_pump.txt; then
+    echo "  ✓ PASS: Pump is RUNNING"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: Pump is NOT running"
+    ((FAIL++))
+fi
+
+# Check PostgreSQL GoldenGate Manager
+docker exec ogg-postgres-replicat bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+INFO MGR
+EXIT
+EOF" > /tmp/ogg_mgr_pg.txt 2>&1
+
+if grep -q "RUNNING" /tmp/ogg_mgr_pg.txt; then
+    echo "  ✓ PASS: PostgreSQL Manager is RUNNING"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: PostgreSQL Manager is not running"
+    ((WARN++))
+fi
+
+# Check Replicat
+docker exec ogg-postgres-replicat bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+INFO REPLICAT rep_postgres
+EXIT
+EOF" > /tmp/ogg_replicat.txt 2>&1
+
+if grep -q "RUNNING" /tmp/ogg_replicat.txt; then
+    echo "  ✓ PASS: Replicat is RUNNING"
+    ((PASS++))
+else
+    echo "  ✗ FAIL: Replicat is NOT running"
+    ((FAIL++))
+fi
+
+echo ""
+echo "Step 5: Checking Replication Lag..."
+echo "-----------------------------------"
+
+# Extract lag
+docker exec ogg-oracle-extract bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+LAG EXTRACT ext_oracle
+EXIT
+EOF" > /tmp/ogg_lag_extract.txt 2>&1
+
+if grep -q "00:00:" /tmp/ogg_lag_extract.txt; then
+    echo "  ✓ PASS: Extract lag is under 1 minute"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: Extract lag may be high"
+    ((WARN++))
+fi
+
+# Replicat lag
+docker exec ogg-postgres-replicat bash -c "cd /opt/oracle/ogg && ./ggsci << EOF
+LAG REPLICAT rep_postgres
+EXIT
+EOF" > /tmp/ogg_lag_replicat.txt 2>&1
+
+if grep -q "00:00:" /tmp/ogg_lag_replicat.txt; then
+    echo "  ✓ PASS: Replicat lag is under 1 minute"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: Replicat lag may be high"
+    ((WARN++))
+fi
+
+echo ""
+echo "Step 6: Checking Data Consistency..."
+echo "------------------------------------"
+
+# Row count in Oracle
+ORACLE_ROWS=$(docker exec ogg-oracle sqlplus -S ogguser/oggpassword@//localhost:1521/XE << EOF
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF ECHO OFF
+SELECT COUNT(*) FROM CUSTOMERS;
+EXIT;
+EOF
+)
+
+# Row count in PostgreSQL
+PG_ROWS=$(docker exec ogg-postgres psql -U postgres -d postgres -t -c "SELECT COUNT(*) FROM public.customers;")
+
+echo "  Oracle CUSTOMERS: $ORACLE_ROWS rows"
+echo "  PostgreSQL customers: $PG_ROWS rows"
+
+if [ "$ORACLE_ROWS" == "$PG_ROWS" ]; then
+    echo "  ✓ PASS: Row counts match"
+    ((PASS++))
+else
+    echo "  ⚠ WARNING: Row counts differ (may be replication lag)"
+    ((WARN++))
+fi
+
+echo ""
+echo "============================================"
+echo "Health Check Summary"
+echo "============================================"
+echo ""
+echo "  ✓ Passed:  $PASS"
+echo "  ⚠ Warnings: $WARN"
+echo "  ✗ Failed:  $FAIL"
+echo ""
+
+if [ $FAIL -eq 0 ] && [ $WARN -eq 0 ]; then
+    echo "Result: ✓ ALL SYSTEMS OPERATIONAL"
+    exit 0
+elif [ $FAIL -eq 0 ]; then
+    echo "Result: ⚠ OPERATIONAL WITH WARNINGS"
     exit 0
 else
-    echo "Some systems are not healthy. Please review the output above."
+    echo "Result: ✗ CRITICAL ISSUES DETECTED"
+    echo ""
+    echo "Troubleshooting steps:"
+    echo "  1. Check logs: docker logs ogg-oracle-extract"
+    echo "  2. Check error file: docker exec ogg-oracle-extract cat /opt/oracle/ogg/ggserr.log"
+    echo "  3. Review setup: ./01-setup-databases.sh"
     exit 1
 fi
 

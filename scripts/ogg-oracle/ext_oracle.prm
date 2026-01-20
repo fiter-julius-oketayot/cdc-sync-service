@@ -1,0 +1,21 @@
+-- Oracle GoldenGate Extract Parameter File
+-- This extracts changes from Oracle source database
+-- File: ext_oracle.prm
+
+EXTRACT ext_oracle
+USERID oggadmin, PASSWORD Welcome1
+EXTTRAIL ./dirdat/lt
+
+-- Enable DDL replication
+DDL INCLUDE MAPPED
+
+-- Table mapping
+TABLE ogguser.CUSTOMERS;
+
+-- Performance tuning
+FETCHOPTIONS USESNAPSHOT
+DBOPTIONS ALLOWUNUSEDCOLUMN
+
+-- Logging
+REPORTCOUNT EVERY 1000 RECORDS, RATE
+

@@ -1,0 +1,18 @@
+-- PostgreSQL Connection Properties for GoldenGate
+-- File: postgres.props
+
+gg.handlerlist=postgres
+gg.handler.postgres.type=postgresql
+gg.handler.postgres.connectionURL=jdbc:postgresql://postgres-db:5432/postgres
+gg.handler.postgres.userName=oggadmin
+gg.handler.postgres.password=Welcome1
+
+# Performance tuning
+gg.handler.postgres.batchSize=1000
+gg.handler.postgres.maxBatchWaitTime=1000
+gg.handler.postgres.includeTokens=false
+
+# Error handling
+gg.handler.postgres.errorResponse=ABEND
+gg.handler.postgres.treatAllColumnsAsStrings=false
+
