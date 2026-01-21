@@ -1,694 +1,431 @@
-# Debezium CDC Sync Service
+# CDC Sync Service
 
-A bi-directional Change Data Capture (CDC) synchronization service between Oracle Database and PostgreSQL using Debezium, Kafka, and Spring Boot.
+A bi-directional Change Data Capture (CDC) synchronization service using Debezium, Apache Kafka, Spring Boot, Oracle, and PostgreSQL. This service captures data changes in real-time from Oracle and PostgreSQL databases and synchronizes them across both systems.
 
 ## Table of Contents
-- [Overview](#overview)
+
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
+- [Project Structure](#project-structure)
 - [Configuration](#configuration)
-- [Testing CDC](#testing-cdc)
+- [Usage](#usage)
 - [Troubleshooting](#troubleshooting)
-- [How It Works](#how-it-works)
-
----
-
-## Overview
-
-This project implements real-time bi-directional database synchronization:
-- **Oracle → PostgreSQL**: Captures changes from Oracle DBZUSER.CUSTOMERS and replicates to PostgreSQL public.customers
-- **PostgreSQL → Oracle**: Captures changes from PostgreSQL and replicates back to Oracle
-
-### Key Features
-- ✅ Real-time CDC using Debezium Oracle and PostgreSQL connectors
-- ✅ Bi-directional synchronization
-- ✅ Automatic schema discovery
-- ✅ Support for INSERT, UPDATE, DELETE operations
-- ✅ LogMiner-based Oracle CDC (no Golden Gate required)
-
----
+- [Technical Details](#technical-details)
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     CDC Architecture                         │
-└─────────────────────────────────────────────────────────────┘
-
-Oracle DB (DBZUSER.CUSTOMERS)
-    ↓ LogMiner CDC
-Debezium Connect (Oracle Connector)
-    ↓ Publishes to
-Kafka Topic: oracle.DBZUSER.CUSTOMERS
-    ↓ Consumed by
-Spring Boot Application
-    ↓ Writes to
-PostgreSQL (public.customers)
-    ↓ PostgreSQL CDC
-Debezium Connect (PostgreSQL Connector)
-    ↓ Publishes to
-Kafka Topic: postgres.public.customers
-    ↓ Consumed by
-Spring Boot Application
-    ↓ Writes back to
-Oracle DB (DBZUSER.CUSTOMERS)
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│   Oracle    │◄───────►│   Kafka     │◄───────►│  PostgreSQL │
+│  (Source)   │         │  (Broker)   │         │  (Target)   │
+└──────┬──────┘         └──────┬──────┘         └──────┬──────┘
+       │                       │                       │
+       │    ┌──────────────────┴──────────────────┐   │
+       │    │         Debezium Connect            │   │
+       │    │  ┌─────────────┐ ┌─────────────┐    │   │
+       └────┼──│   Oracle    │ │  PostgreSQL │────┼───┘
+            │  │  Connector  │ │  Connector  │    │
+            │  └─────────────┘ └─────────────┘    │
+            └──────────────────┬──────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │  CDC Sync Service   │
+                    │   (Spring Boot)     │
+                    │                     │
+                    │  - Kafka Consumer   │
+                    │  - JPA (PostgreSQL) │
+                    │  - JDBC (Oracle)    │
+                    └─────────────────────┘
 ```
 
-### Components
-- **Oracle XE 21c**: Source database with DBZUSER schema
-- **PostgreSQL 15**: Target database with public schema
-- **Apache Kafka**: Message broker for CDC events
-- **Debezium Connect**: CDC connectors for Oracle and PostgreSQL
-- **Spring Boot**: Java application that consumes CDC events and performs sync
+### Data Flow
 
----
+1. **Oracle → PostgreSQL**: Changes in Oracle `DBZUSER.CUSTOMERS` table are captured by Debezium, published to Kafka topic `oracle.DBZUSER.CUSTOMERS`, consumed by the Spring Boot service, and applied to PostgreSQL `public.customers` table.
+
+2. **PostgreSQL → Oracle**: Changes in PostgreSQL `public.customers` table are captured by Debezium, published to Kafka topic `postgres.public.customers`, consumed by the Spring Boot service, and applied to Oracle `DBZUSER.CUSTOMERS` table.
 
 ## Prerequisites
 
-### Software Requirements
-- Docker & Docker Compose
-- JDK 17+
-- Gradle 8+ (or use included wrapper)
-
-### Docker Containers
-All services run in Docker:
-- `oracle-db`: Oracle XE 21c (port 1521)
-- `postgres`: PostgreSQL 15 (port 5433)
-- `zookeeper`: Kafka coordination (port 2181)
-- `kafka`: Message broker (port 9092)
-- `connect`: Debezium Connect (port 8083)
-
----
+- **Docker** and **Docker Compose** v2.0+
+- **Java 17** or higher
+- **Gradle 7.0+** (or use the included Gradle wrapper)
+- **Git Bash** or **WSL** (for running shell scripts on Windows)
+- At least **8GB RAM** available for Docker containers
 
 ## Quick Start
 
-### 1. Start All Services
+### 1. Start Infrastructure
 
 ```bash
+# Clone the repository and navigate to the project directory
+cd cdc-sync-service
+
+# Start all Docker containers (Kafka, Oracle, PostgreSQL, Debezium Connect)
 docker-compose up -d
 ```
 
-Wait ~2 minutes for all services to be healthy.
-
-### 2. Setup Oracle Database
-
-#### Enable ARCHIVELOG Mode
-
-Connect to Oracle using DBeaver or SQL*Plus as SYSDBA:
-
-```sql
--- Connect as SYSDBA
-SHUTDOWN IMMEDIATE;
-STARTUP MOUNT;
-ALTER DATABASE ARCHIVELOG;
-ALTER DATABASE OPEN;
-
--- Verify
-SELECT LOG_MODE FROM V$DATABASE;
--- Should show: ARCHIVELOG
-```
-
-#### Create CDC User and Table
+Wait for all containers to be healthy (Oracle may take 2-3 minutes to start):
 
 ```bash
-cd scripts
-docker cp setup-oracle.sql oracle-db:/tmp/
-docker exec oracle-db sqlplus / as sysdba @/tmp/setup-oracle.sql
+# Check container status
+docker ps
 ```
 
-This creates:
-- `DBZUSER` user with LogMiner permissions
-- `DBZUSER.CUSTOMERS` table with supplemental logging
-- Sample test data
-
-### 3. Setup PostgreSQL Database
+### 2. Setup Databases
 
 ```bash
-docker cp setup-postgres.sql postgres:/tmp/
-docker exec postgres psql -U postgres -f /tmp/setup-postgres.sql
+# Run the unified setup script (sets up both Oracle and PostgreSQL)
+./scripts/setup.sh
+
+# Or setup individually:
+./scripts/setup.sh oracle     # Oracle only
+./scripts/setup.sh postgres   # PostgreSQL only
 ```
 
-This creates:
-- `public.customers` table
-- Enables PostgreSQL logical replication
-
-### 4. Register Debezium Connectors
+### 3. Register Debezium Connectors
 
 ```bash
-./register-connectors.sh
+# Register both Oracle and PostgreSQL connectors
+./scripts/connectors.sh register
 ```
 
-Wait ~30 seconds for connectors to start.
-
-### 5. Verify Connector Status
+### 4. Run the Spring Boot Application
 
 ```bash
-./health-check.sh
-```
-
-Expected output:
-```
-✓ Oracle Connector: RUNNING
-✓ PostgreSQL Connector: RUNNING
-✓ Kafka topics created
-✓ Spring Boot ready to start
-```
-
-### 6. Start Spring Boot Application
-
-```bash
-cd ..
+# Using Gradle wrapper
 ./gradlew bootRun
+
+# Or build and run the JAR
+./gradlew build
+java -jar build/libs/cdc-sync-service-0.0.1-SNAPSHOT.jar
 ```
 
----
-
-## Configuration
-
-### Oracle Connector Configuration
-
-File: `connectors/oracle-connector.json`
-
-Key settings:
-```json
-{
-  "database.hostname": "oracle-db",
-  "database.user": "dbzuser",
-  "database.password": "dbzpassword",
-  "database.dbname": "XE",
-  "schema.include.list": "DBZUSER",
-  "log.mining.strategy": "online_catalog",
-  "snapshot.mode": "initial"
-}
-```
-
-**Important Notes:**
-- Uses **DBZUSER** schema (NOT SYSTEM) to avoid Debezium filtering
-- Requires all V$ views permissions for LogMiner
-- ARCHIVELOG mode must be enabled
-- Supplemental logging required at table level
-
-### PostgreSQL Connector Configuration
-
-File: `connectors/postgres-connector.json`
-
-Key settings:
-```json
-{
-  "database.hostname": "postgres",
-  "database.user": "postgres",
-  "schema.include.list": "public",
-  "plugin.name": "pgoutput"
-}
-```
-
-### Application Configuration
-
-File: `src/main/resources/application.yml`
-
-```yaml
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5433/postgres
-    username: postgres
-    password: postgres
-
-oracle:
-  datasource:
-    jdbc-url: jdbc:oracle:thin:@localhost:1521/XE
-    username: dbzuser
-    password: dbzpassword
-
-kafka:
-  bootstrap-servers: localhost:9092
-```
-
----
-
-## Testing CDC
-
-### Test Oracle → PostgreSQL Sync
-
-1. **Insert in Oracle:**
-```bash
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-INSERT INTO CUSTOMERS VALUES (999, 'Test', 'User', 'test@example.com');
-COMMIT;
-EXIT;
-EOF
-```
-
-2. **Verify in PostgreSQL (within 2-3 seconds):**
-```bash
-docker exec postgres psql -U postgres -d postgres -c "SELECT * FROM public.customers WHERE id = 999;"
-```
-
-### Test PostgreSQL → Oracle Sync
-
-1. **Insert in PostgreSQL:**
-```bash
-docker exec postgres psql -U postgres -d postgres -c "INSERT INTO public.customers VALUES (888, 'Reverse', 'Sync', 'reverse@test.com');"
-```
-
-2. **Verify in Oracle (within 2-3 seconds):**
-```bash
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-SELECT * FROM CUSTOMERS WHERE ID=888;
-EXIT;
-EOF
-```
-
-### Monitor Kafka Topics
+### 5. Verify Setup
 
 ```bash
-# List all topics
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
-
-# View Oracle CDC events
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic oracle.DBZUSER.CUSTOMERS \
-  --from-beginning
-
-# View PostgreSQL CDC events
-docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic postgres.public.customers \
-  --from-beginning
+# Run health check
+./scripts/health-check.sh
 ```
-
----
-
-## Troubleshooting
-
-### Issue 1: Oracle Connector Shows FAILED
-
-**Symptom:** Connector state is FAILED, task shows error
-
-**Check:**
-```bash
-curl -s http://localhost:8083/connectors/oracle-connector/status | jq '.'
-```
-
-**Common Causes:**
-
-#### Missing V$ Permissions
-```sql
--- Connect as SYSDBA
-GRANT SELECT ON V_$LOGMNR_CONTENTS TO DBZUSER;
-GRANT SELECT ON V_$LOGMNR_LOGS TO DBZUSER;
-GRANT SELECT ON V_$LOG TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVED_LOG TO DBZUSER;
-GRANT SELECT ON V_$DATABASE TO DBZUSER;
-GRANT SELECT ON V_$THREAD TO DBZUSER;
-GRANT SELECT ON V_$TRANSACTION TO DBZUSER;
-GRANT SELECT ON V_$ARCHIVE_DEST_STATUS TO DBZUSER;
-GRANT SELECT ON V_$STATNAME TO DBZUSER;
-GRANT SELECT ON V_$MYSTAT TO DBZUSER;
-GRANT EXECUTE_CATALOG_ROLE TO DBZUSER;
-GRANT SELECT ANY TRANSACTION TO DBZUSER;
-GRANT FLASHBACK ANY TABLE TO DBZUSER;
-```
-
-#### ARCHIVELOG Not Enabled
-```sql
--- Check status
-SELECT LOG_MODE FROM V$DATABASE;
-
--- If NOARCHIVELOG, enable it:
-SHUTDOWN IMMEDIATE;
-STARTUP MOUNT;
-ALTER DATABASE ARCHIVELOG;
-ALTER DATABASE OPEN;
-```
-
-#### Supplemental Logging Not Enabled
-```sql
--- Enable at database level
-ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
-
--- Enable at table level
-ALTER TABLE DBZUSER.CUSTOMERS ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
-
--- Verify
-SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V$DATABASE;
-SELECT TABLE_NAME, LOG_GROUP_NAME FROM USER_LOG_GROUPS WHERE TABLE_NAME='CUSTOMERS';
-```
-
-### Issue 2: No Kafka Topics Created
-
-**Symptom:** Connector is RUNNING but no topics appear
-
-**Check:**
-```bash
-# Check connector status
-curl -s http://localhost:8083/connectors/oracle-connector/status
-
-# Check Debezium logs
-docker logs debezium-connect --tail 100 | grep -i oracle
-```
-
-**Solution:**
-```bash
-# Force redo log switch
-docker exec oracle-db sqlplus / as sysdba <<EOF
-ALTER SYSTEM SWITCH LOGFILE;
-ALTER SYSTEM CHECKPOINT;
-EXIT;
-EOF
-
-# Insert a test record
-docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<EOF
-INSERT INTO CUSTOMERS VALUES (777, 'Force', 'Topic', 'force@test.com');
-COMMIT;
-EXIT;
-EOF
-
-# Wait 15 seconds and check topics
-sleep 15
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list | grep oracle
-```
-
-### Issue 3: Spring Boot Application Errors
-
-**Error:** `ORA-00903: invalid table name` when querying `public.customers`
-
-**Cause:** PostgreSQL table doesn't exist
-
-**Solution:**
-```bash
-docker exec postgres psql -U postgres -d postgres <<EOF
-CREATE TABLE IF NOT EXISTS public.customers (
-    id BIGINT PRIMARY KEY,
-    first_name VARCHAR(255),
-    last_name VARCHAR(255),
-    email VARCHAR(255)
-);
-EOF
-```
-
-### Issue 4: "No changes will be captured" Warning
-
-**Symptom:** Debezium logs show "After applying the include/exclude list filters, no changes will be captured"
-
-**Cause:** Using SYSTEM schema which Debezium filters out
-
-**Solution:** Use DBZUSER schema (already configured in this project)
-
-### Check Overall Health
-
-```bash
-cd scripts
-./health-check.sh
-```
-
-This script verifies:
-- ✓ All Docker containers running
-- ✓ Kafka accessible
-- ✓ Databases accessible
-- ✓ Tables exist with correct structure
-- ✓ Connectors registered and RUNNING
-- ✓ Spring Boot application ready
-
----
-
-## How It Works
-
-### Oracle CDC with LogMiner
-
-1. **ARCHIVELOG Mode**: Oracle writes all changes to redo logs in archive mode
-2. **Supplemental Logging**: Enriches redo logs with before/after column values
-3. **LogMiner**: Debezium queries `V$LOGMNR_CONTENTS` to read redo log entries
-4. **Change Extraction**: Converts redo log entries to CDC events
-5. **Kafka Publishing**: Publishes events to `oracle.DBZUSER.CUSTOMERS` topic
-
-### PostgreSQL CDC with pgoutput
-
-1. **Logical Replication**: PostgreSQL WAL contains logical change records
-2. **Replication Slot**: Debezium creates a slot to track position
-3. **Publication**: Defines which tables to capture
-4. **Event Extraction**: Reads WAL and converts to CDC events
-5. **Kafka Publishing**: Publishes events to `postgres.public.customers` topic
-
-### Spring Boot Event Processing
-
-#### Oracle → PostgreSQL
-
-```java
-@KafkaListener(topics = "oracle.DBZUSER.CUSTOMERS")
-public void handleOracleChange(ConsumerRecord<String, String> record) {
-    // Parse CDC event
-    JsonNode root = objectMapper.readTree(record.value());
-    String op = root.get("op").asText(); // c=create, u=update, d=delete
-    
-    // Extract data (Oracle uses UPPERCASE columns)
-    JsonNode after = root.get("after");
-    Long id = after.get("ID").asLong();
-    String firstName = after.get("FIRST_NAME").asText();
-    
-    // Save to PostgreSQL using JPA
-    customerRepository.save(customer);
-}
-```
-
-#### PostgreSQL → Oracle
-
-```java
-@KafkaListener(topics = "postgres.public.customers")
-public void handlePostgresChange(ConsumerRecord<String, String> record) {
-    // Parse CDC event
-    JsonNode root = objectMapper.readTree(record.value());
-    
-    // Extract data (PostgreSQL uses lowercase columns)
-    JsonNode after = root.get("after");
-    Long id = after.get("id").asLong();
-    
-    // Upsert to Oracle using JDBC
-    String sql = "MERGE INTO DBZUSER.CUSTOMERS c USING (...) s ON (c.ID = s.ID) ...";
-    oracleJdbcTemplate.update(sql, id, firstName, lastName, email);
-}
-```
-
-### CDC Event Format
-
-Debezium CDC events follow this structure:
-
-```json
-{
-  "before": { "ID": 1, "FIRST_NAME": "John", ... },
-  "after": { "ID": 1, "FIRST_NAME": "Jane", ... },
-  "source": {
-    "version": "2.7.4.Final",
-    "connector": "oracle",
-    "name": "oracle",
-    "ts_ms": 1768123456789,
-    "snapshot": "false",
-    "db": "XE",
-    "schema": "DBZUSER",
-    "table": "CUSTOMERS",
-    "scn": 5027093
-  },
-  "op": "u",  // c=create, u=update, d=delete, r=read(snapshot)
-  "ts_ms": 1768123456789
-}
-```
-
----
 
 ## Project Structure
 
 ```
 cdc-sync-service/
-├── src/main/java/com/accessbank/cdc/
-│   ├── CdcSyncServiceApplication.java    # Spring Boot main class
-│   ├── config/
-│   │   └── DataSourceConfig.java         # Oracle + PostgreSQL datasource config
-│   ├── model/
-│   │   └── Customer.java                 # JPA entity
-│   ├── repository/
-│   │   └── CustomerRepository.java       # Spring Data JPA repository
-│   └── service/
-│       └── CdcEventHandler.java          # Kafka listener & CDC logic
-├── src/main/resources/
-│   └── application.yml                    # Application configuration
-├── connectors/
-│   ├── oracle-connector.json             # Debezium Oracle connector config
-│   └── postgres-connector.json           # Debezium PostgreSQL connector config
-├── scripts/
-│   ├── setup-oracle.sql                  # Oracle setup script
-│   ├── setup-postgres.sql                # PostgreSQL setup script
-│   ├── register-connectors.sh            # Register Debezium connectors
-│   └── health-check.sh                   # Health check script
-├── docker-compose.yml                     # All services configuration
-├── build.gradle                          # Gradle build file
-└── README.md                             # This file
+├── build.gradle                 # Gradle build configuration
+├── docker-compose.yml           # Docker services configuration
+├── settings.gradle              # Gradle settings
+├── gradlew / gradlew.bat        # Gradle wrapper scripts
+│
+├── connectors/                  # Debezium connector configurations
+│   ├── oracle-connector.json    # Oracle CDC connector config
+│   └── postgres-connector.json  # PostgreSQL CDC connector config
+│
+├── scripts/                     # Setup and management scripts
+│   ├── setup.sh                 # Database setup (Oracle & PostgreSQL)
+│   ├── setup.sql                # SQL scripts for both databases
+│   ├── connectors.sh            # Connector management
+│   └── health-check.sh          # System health verification
+│
+└── src/main/
+    ├── java/com/accessbank/cdc/
+    │   ├── CdcSyncServiceApplication.java  # Main application
+    │   ├── config/
+    │   │   └── DataSourceConfig.java       # Dual datasource config
+    │   ├── model/
+    │   │   └── Customer.java               # JPA entity
+    │   ├── repository/
+    │   │   └── CustomerRepository.java     # Spring Data JPA repository
+    │   └── service/
+    │       └── CdcEventHandler.java        # Kafka CDC event processor
+    └── resources/
+        └── application.yml                 # Application configuration
 ```
 
----
+## Configuration
 
-## API Endpoints
+### Docker Services (docker-compose.yml)
 
-### Debezium Connect REST API
+| Service | Port | Description |
+|---------|------|-------------|
+| kafka | 9092 | Apache Kafka broker (KRaft mode) |
+| postgres | 5433 | PostgreSQL 16 database |
+| oracle | 1521 | Oracle XE 21c database |
+| connect | 8083 | Debezium Connect REST API |
+
+### Application Configuration (application.yml)
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `spring.datasource.url` | `jdbc:postgresql://localhost:5433/postgres` | PostgreSQL connection URL |
+| `spring.kafka.bootstrap-servers` | `localhost:9092` | Kafka bootstrap servers |
+| `oracle.datasource.jdbc-url` | `jdbc:oracle:thin:@localhost:1521/XE` | Oracle connection URL |
+| `oracle.datasource.username` | `dbzuser` | Oracle CDC user |
+
+### Database Credentials
+
+**PostgreSQL:**
+- Host: `localhost:5433`
+- Database: `postgres`
+- Username: `postgres`
+- Password: `postgres`
+
+**Oracle:**
+- Host: `localhost:1521`
+- Service: `XE`
+- CDC User: `dbzuser`
+- CDC Password: `dbzpassword`
+- SYS Password: `oracle`
+
+## Usage
+
+### Script Commands
+
+#### Setup Script (`./scripts/setup.sh`)
 
 ```bash
-# List all connectors
-curl http://localhost:8083/connectors
-
-# Check connector status
-curl http://localhost:8083/connectors/oracle-connector/status
-
-# Get connector configuration
-curl http://localhost:8083/connectors/oracle-connector
-
-# Delete connector
-curl -X DELETE http://localhost:8083/connectors/oracle-connector
-
-# Register connector
-curl -X POST http://localhost:8083/connectors \
-  -H "Content-Type: application/json" \
-  -d @connectors/oracle-connector.json
+./scripts/setup.sh              # Setup both Oracle and PostgreSQL
+./scripts/setup.sh oracle       # Setup Oracle only
+./scripts/setup.sh postgres     # Setup PostgreSQL only
+./scripts/setup.sh help         # Show help
 ```
 
-### Spring Boot Application
-
-The application runs on port **8080** and provides:
-- Health check: `http://localhost:8080/actuator/health`
-- Metrics: `http://localhost:8080/actuator/metrics`
-
----
-
-## Performance Tuning
-
-### Oracle LogMiner
-
-Adjust in `connectors/oracle-connector.json`:
-
-```json
-{
-  "log.mining.batch.size.default": "1000",
-  "log.mining.sleep.time.default.ms": "1000",
-  "log.mining.view.fetch.size": "10000"
-}
-```
-
-### Kafka Consumer
-
-Adjust in `application.yml`:
-
-```yaml
-spring:
-  kafka:
-    consumer:
-      max-poll-records: 500
-      fetch-min-size: 1024
-      fetch-max-wait-ms: 500
-```
-
----
-
-## Security Considerations
-
-### Production Recommendations
-
-1. **Change Default Passwords:**
-   - Oracle: `dbzuser/dbzpassword`
-   - PostgreSQL: `postgres/postgres`
-   - Kafka: Enable SASL authentication
-
-2. **Network Security:**
-   - Use private networks
-   - Enable SSL/TLS for all connections
-   - Restrict port access
-
-3. **Oracle Permissions:**
-   - Grant only necessary V$ views
-   - Use dedicated CDC user (not SYSTEM or SYS)
-   - Enable auditing
-
-4. **Kafka Security:**
-   - Enable authentication (SASL)
-   - Enable encryption (SSL)
-   - Configure ACLs for topic access
-
----
-
-## Limitations
-
-1. **Schema Changes**: Schema evolution is not automatically handled. Requires manual connector restart.
-2. **Large Transactions**: Very large transactions may cause memory issues. Monitor heap usage.
-3. **Oracle XE**: Limited to 2 CPU threads and 2GB RAM. Use Oracle EE for production.
-4. **Data Types**: Complex types (CLOB, BLOB, custom types) may require special handling.
-5. **Conflict Resolution**: Last-write-wins strategy. No automatic conflict detection.
-
----
-
-## License
-
-This project is for demonstration purposes. Adjust as needed for your use case.
-
----
-
-## Support
-
-For issues or questions:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review Debezium logs: `docker logs debezium-connect`
-3. Check connector status: `curl http://localhost:8083/connectors/oracle-connector/status`
-4. Run health check: `./scripts/health-check.sh`
-
----
-
-## Useful Commands Reference
+#### Connector Management (`./scripts/connectors.sh`)
 
 ```bash
-# Start all services
-docker-compose up -d
+./scripts/connectors.sh register   # Register all connectors
+./scripts/connectors.sh delete     # Delete all connectors
+./scripts/connectors.sh status     # Check connector status
+./scripts/connectors.sh restart    # Restart all connectors
+```
 
-# Stop all services
-docker-compose down
+#### Health Check (`./scripts/health-check.sh`)
 
-# View logs
-docker logs oracle-db
-docker logs postgres
-docker logs kafka
-docker logs debezium-connect
+```bash
+./scripts/health-check.sh          # Run comprehensive health check
+```
 
-# Restart a service
-docker-compose restart connect
+### Testing CDC Synchronization
 
-# Execute SQL in Oracle
+#### Test Oracle → PostgreSQL
+
+```bash
+# Connect to Oracle
 docker exec -it oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE
 
-# Execute SQL in PostgreSQL
-docker exec -it postgres psql -U postgres -d postgres
+# Insert a new record
+INSERT INTO CUSTOMERS VALUES (100, 'Test', 'User', 'test@example.com');
+COMMIT;
 
-# List Kafka topics
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+# Verify in PostgreSQL
+docker exec postgres psql -U postgres -c "SELECT * FROM public.customers WHERE id = 100;"
+```
 
-# Consume from topic
+#### Test PostgreSQL → Oracle
+
+```bash
+# Connect to PostgreSQL
+docker exec -it postgres psql -U postgres
+
+# Insert a new record
+INSERT INTO public.customers (id, first_name, last_name, email)
+VALUES (200, 'Demo', 'User', 'demo@example.com');
+
+# Verify in Oracle
+docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<< "SELECT * FROM CUSTOMERS WHERE ID = 200;"
+```
+
+### Monitoring Kafka Topics
+
+```bash
+# List all CDC topics
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 --list
+
+# Consume Oracle CDC events
 docker exec kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
+  --bootstrap-server kafka:29092 \
   --topic oracle.DBZUSER.CUSTOMERS \
   --from-beginning
 
-# Check connector status
-curl -s http://localhost:8083/connectors/oracle-connector/status | jq '.'
-
-# Register connector
-cd scripts && ./register-connectors.sh
-
-# Health check
-cd scripts && ./health-check.sh
-
-# Build application
-./gradlew clean build
-
-# Run application
-./gradlew bootRun
+# Consume PostgreSQL CDC events
+docker exec kafka kafka-console-consumer \
+  --bootstrap-server kafka:29092 \
+  --topic postgres.public.customers \
+  --from-beginning
 ```
+
+### Viewing Logs
+
+```bash
+# Spring Boot application logs
+./gradlew bootRun 2>&1 | tee app.log
+
+# Debezium Connect logs
+docker logs -f debezium-connect
+
+# Kafka logs
+docker logs -f kafka
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Oracle Container Not Starting
+
+```bash
+# Check Oracle logs
+docker logs oracle-db
+
+# Oracle may take 2-3 minutes to initialize on first start
+# Wait and check health status
+docker inspect --format='{{.State.Health.Status}}' oracle-db
+```
+
+#### 2. Debezium Connector Failing
+
+```bash
+# Check connector status
+./scripts/connectors.sh status
+
+# View detailed error logs
+docker logs debezium-connect | grep -i error
+
+# Restart connectors
+./scripts/connectors.sh restart
+```
+
+#### 3. Kafka Connection Issues
+
+```bash
+# Verify Kafka is running
+docker exec kafka kafka-broker-api-versions --bootstrap-server kafka:29092
+
+# Check Kafka logs
+docker logs kafka
+```
+
+#### 4. CDC Events Not Being Captured
+
+For Oracle:
+```bash
+# Verify ARCHIVELOG mode
+docker exec oracle-db sqlplus / as sysdba <<< "SELECT LOG_MODE FROM V\$DATABASE;"
+
+# Verify supplemental logging
+docker exec oracle-db sqlplus / as sysdba <<< "SELECT SUPPLEMENTAL_LOG_DATA_MIN FROM V\$DATABASE;"
+```
+
+For PostgreSQL:
+```bash
+# Verify WAL level
+docker exec postgres psql -U postgres -c "SHOW wal_level;"
+
+# Verify replica identity
+docker exec postgres psql -U postgres -c \
+  "SELECT relname, relreplident FROM pg_class WHERE relname = 'customers';"
+```
+
+#### 5. Application Not Connecting to Databases
+
+```bash
+# Test PostgreSQL connection
+docker exec postgres psql -U postgres -c "SELECT 1;"
+
+# Test Oracle connection
+docker exec oracle-db sqlplus dbzuser/dbzpassword@//localhost:1521/XE <<< "SELECT 1 FROM DUAL;"
+```
+
+### Reset Everything
+
+```bash
+# Stop all containers and remove volumes
+docker-compose down -v
+
+# Start fresh
+docker-compose up -d
+
+# Re-run setup
+./scripts/setup.sh
+./scripts/connectors.sh register
+```
+
+## Technical Details
+
+### Debezium CDC Events
+
+Debezium publishes CDC events in JSON format with the following structure:
+
+```json
+{
+  "op": "c",           // Operation: c=create, u=update, d=delete, r=read (snapshot)
+  "before": null,      // Previous state (for updates/deletes)
+  "after": {           // New state (for creates/updates)
+    "ID": 1,
+    "FIRST_NAME": "John",
+    "LAST_NAME": "Doe",
+    "EMAIL": "john@example.com"
+  },
+  "source": { ... },   // Source metadata
+  "ts_ms": 1642000000  // Timestamp
+}
+```
+
+### Supported Operations
+
+| Operation | Code | Description |
+|-----------|------|-------------|
+| Create | `c` | New row inserted |
+| Update | `u` | Existing row modified |
+| Delete | `d` | Row removed |
+| Read | `r` | Initial snapshot read |
+
+### Database Table Schema
+
+**Oracle (`DBZUSER.CUSTOMERS`):**
+```sql
+CREATE TABLE DBZUSER.CUSTOMERS (
+  ID NUMBER(19,0) NOT NULL PRIMARY KEY,
+  FIRST_NAME VARCHAR2(255),
+  LAST_NAME VARCHAR2(255),
+  EMAIL VARCHAR2(255)
+);
+```
+
+**PostgreSQL (`public.customers`):**
+```sql
+CREATE TABLE public.customers (
+  id BIGINT PRIMARY KEY,
+  first_name VARCHAR(255),
+  last_name VARCHAR(255),
+  email VARCHAR(255)
+);
+```
+
+### Dependencies
+
+| Dependency | Version | Purpose |
+|------------|---------|---------|
+| Spring Boot | 3.3.4 | Application framework |
+| Spring Kafka | (managed) | Kafka integration |
+| Spring Data JPA | (managed) | PostgreSQL ORM |
+| PostgreSQL Driver | (managed) | PostgreSQL connectivity |
+| Oracle JDBC | 23.3.0 | Oracle connectivity |
+| Jackson | (managed) | JSON processing |
+| Debezium | 2.7 | CDC connectors |
+| Apache Kafka | 3.9.1 | Message broker |
+
+## License
+
+This project is provided for demonstration purposes.
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
 
 ---
 
-**Last Updated:** January 11, 2026
-
+**Last Updated:** January 2026
