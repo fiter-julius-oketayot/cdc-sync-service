@@ -9,7 +9,9 @@
     "database.password": "dbzpassword",
     "database.dbname": "XE",
     "database.server.name": "oracle",
+    "database.url": "jdbc:oracle:thin:@oracle-db:1521/XE",
     "schema.include.list": "DBZUSER",
+    "table.include.list": "DBZUSER.CUSTOMERS",
     "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",
     "schema.history.internal.kafka.topic": "schema-changes.oracle",
     "log.mining.strategy": "online_catalog",
@@ -20,7 +22,8 @@
     "value.converter.schemas.enable": "false",
     "snapshot.mode": "initial",
     "decimal.handling.mode": "double",
-    "database.connection.adapter": "logminer"
+    "database.connection.adapter": "logminer",
+    "database.oracle.version": "21"
   }
 }
 
